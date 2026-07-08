@@ -4,34 +4,13 @@
 
 Project Atlas is a personal engineering project designed to collect, process, analyze, and summarize cloud database operational data using modern data engineering pipelines.
 
-The long-term goal of this project is to transform traditional database administration work into a modern cloud data platform approach.
-
 ---
 
 ## Vision
 
-Database operations generate valuable signals every day: CPU usage, connections, storage, I/O, slow queries, top SQL, events, alarms, and performance trends.
+Project Atlas aims to transform traditional database operations into a modern cloud data platform.
 
-However, these signals are often scattered across multiple tools such as CloudWatch, Performance Insights, database logs, and monitoring dashboards.
-
-Project Atlas aims to collect those signals into a centralized data platform and turn them into actionable insights.
-
----
-
-## Why This Project Exists
-
-Traditional DBA work is often focused on backup, recovery, migration, and manual troubleshooting.
-
-This project explores a more modern direction:
-
-- Database Observability
-- Data Engineering
-- Cloud Automation
-- Airflow-based Orchestration
-- AI-assisted Operations
-- Operational Analytics
-
-The purpose is not only to monitor databases, but also to build a data pipeline that helps engineers understand database behavior over time.
+The project collects database operational signals such as CPU usage, connections, storage, I/O, logs, events, and performance metrics, then turns them into actionable insights.
 
 ---
 
@@ -45,25 +24,46 @@ The first milestone is to collect AWS CloudWatch metrics for Amazon RDS using Py
 
 ---
 
-## Target Architecture
+## Planned Features
 
-```text
-AWS CloudWatch
-Performance Insights
-Database Logs
-RDS Events
-        |
-        v
-Python Collector
-        |
-        v
-Amazon S3
-        |
-        v
-AWS Glue Data Catalog
-        |
-        v
-Amazon Athena
-        |
-        v
-Dashboard / Report / AI Summary
+- Collect RDS CloudWatch metrics using Python
+- Store collected data in Amazon S3
+- Build a data lake structure using S3, Glue, and Athena
+- Create Airflow DAGs for workflow orchestration
+- Collect Performance Insights data
+- Generate database operation reports
+- Add AI-based database health summary
+- Send summaries to Slack or email
+
+---
+
+## Tech Stack
+
+- Python
+- SQL
+- AWS CloudWatch
+- Amazon RDS
+- Amazon S3
+- AWS Glue
+- Amazon Athena
+- Apache Airflow / Amazon MWAA
+- AI Summary
+
+---
+
+## Roadmap
+
+| Phase | Goal | Status |
+|---|---|---|
+| Phase 0 | Repository setup and planning | In Progress |
+| Phase 1 | CloudWatch metric collection | Planned |
+| Phase 2 | S3 data lake foundation | Planned |
+| Phase 3 | Airflow orchestration | Planned |
+| Phase 4 | Performance Insights analytics | Planned |
+| Phase 5 | AI-powered database summary | Planned |
+
+---
+
+## License
+
+MIT License
