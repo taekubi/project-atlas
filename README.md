@@ -16,12 +16,20 @@ The project collects database operational signals such as CPU usage, connections
 
 ## Current Status
 
-> Phase 0: Project setup and architecture planning
+> Milestone 1 completed: GitHub setup and AWS RDS API integration
 
-This repository is currently in the early stage.
+The first collector retrieves Amazon RDS inventory information through Boto3 using an AWS CLI login profile.
 
-The first milestone is to collect AWS CloudWatch metrics for Amazon RDS using Python and store the result in Amazon S3.
+### Completed
 
+- GitHub repository and project structure
+- Python virtual environment
+- AWS CLI v2 authentication
+- RDS inventory collection using Boto3
+
+### Next Milestone
+
+Collect Amazon RDS CloudWatch metrics and store them as structured JSON data.
 ---
 
 ## Planned Features
