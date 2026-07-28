@@ -37,16 +37,20 @@ METRIC_CONFIG: dict[str, dict[str, str]] = {
 
 
 def create_session(
-    profile_name: str,
     region_name: str,
+    profile_name: str | None = None,
 ) -> boto3.Session:
-    """Create a Boto3 session using an AWS CLI profile."""
+    """Create a Boto3 session using a profile or the default credential chain."""
+
+    if profile_name:
+        return boto3.Session(
+            profile_name=profile_name,
+            region_name=region_name,
+        )
 
     return boto3.Session(
-        profile_name=profile_name,
         region_name=region_name,
     )
-
 
 def collect_metrics(
     session: boto3.Session,
@@ -166,7 +170,10 @@ def collect_metrics(
     return payloads
 
 
-def save_json(payload: dict[str, Any]) -> Path:
+def save_json(
+    payload: dict[str, Any],
+    output_root: Path = Path("data/raw/cloudwatch"),
+) -> Path:
     """Save metric data using a partitioned directory structure."""
 
     end_time = datetime.fromisoformat(
@@ -174,7 +181,7 @@ def save_json(payload: dict[str, Any]) -> Path:
     )
 
     output_path = (
-        Path("data/raw/cloudwatch")
+        output_root
         / f"region={payload['region']}"
         / f"metric={payload['metric_name']}"
         / f"date={end_time:%Y-%m-%d}"

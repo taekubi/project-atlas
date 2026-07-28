@@ -34,7 +34,7 @@ def build_object_key(
 
 
 def upload_file(
-    profile_name: str,
+    profile_name: str | None,
     region_name: str,
     bucket_name: str,
     file_path: Path,
@@ -42,10 +42,15 @@ def upload_file(
 ) -> dict[str, Any]:
     """Upload a local JSON file and verify the resulting S3 object."""
 
-    session = boto3.Session(
-        profile_name=profile_name,
-        region_name=region_name,
-    )
+    if profile_name:
+        session = boto3.Session(
+            profile_name=profile_name,
+            region_name=region_name,
+        )
+    else:
+        session = boto3.Session(
+            region_name=region_name,
+        )
 
     s3 = session.client("s3")
 
