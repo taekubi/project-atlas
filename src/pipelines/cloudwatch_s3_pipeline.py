@@ -19,7 +19,7 @@ from src.storage.s3_uploader import build_object_key, upload_file
 
 
 def run_pipeline(
-    profile_name: str,
+    profile_name: str | None,
     region_name: str,
     bucket_name: str,
     db_instance_identifier: str,
@@ -48,7 +48,10 @@ def run_pipeline(
     results: list[dict[str, Any]] = []
 
     for payload in payloads:
-        local_path = save_json(payload)
+        local_path = save_json(
+            payload=payload,
+            output_root=source_root,
+        )
 
         object_key = build_object_key(
             file_path=local_path,
@@ -63,7 +66,6 @@ def run_pipeline(
             file_path=local_path,
             object_key=object_key,
         )
-
         results.append(
             {
                 "metric_name": payload["metric_name"],
