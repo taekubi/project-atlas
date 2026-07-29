@@ -1,0 +1,9 @@
+{
+  "Arn": "arn:aws:lambda:ap-northeast-2:714933490352:function:project-atlas-cloudwatch-s3",
+  "RoleArn": "arn:aws:iam::714933490352:role/project-atlas-scheduler-role",
+  "Input": "{}",
+  "RetryPolicy": {
+    "MaximumEventAgeInSeconds": 3600,
+    "MaximumRetryAttempts": 2
+  }
+}

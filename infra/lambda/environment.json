@@ -1,0 +1,11 @@
+{
+  "Variables": {
+    "ATLAS_BUCKET": "project-atlas-data-714933490352-ap-northeast-2",
+    "DB_INSTANCE_IDENTIFIER": "secret-test-maria",
+    "METRICS": "CPUUtilization",
+    "LOOKBACK_MINUTES": "15",
+    "PERIOD_SECONDS": "300",
+    "OUTPUT_ROOT": "/tmp/cloudwatch",
+    "S3_PREFIX": "raw/cloudwatch"
+  }
+}
