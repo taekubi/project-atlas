@@ -36,6 +36,12 @@ METRIC_CONFIG: dict[str, dict[str, str]] = {
 }
 
 
+RESOURCE_DIMENSIONS: dict[str, str] = {
+    "DBInstanceIdentifier": "DBInstance",
+    "DBClusterIdentifier": "DBCluster",
+}
+
+
 def create_session(
     region_name: str,
     profile_name: str | None = None,
@@ -52,15 +58,23 @@ def create_session(
         region_name=region_name,
     )
 
+
 def collect_metrics(
     session: boto3.Session,
     region_name: str,
-    db_instance_identifier: str,
+    resource_dimension: str,
+    resource_id: str,
     metric_names: list[str],
     lookback_minutes: int = 60,
     period_seconds: int = 300,
 ) -> list[dict[str, Any]]:
     """Collect multiple Amazon RDS CloudWatch metrics."""
+
+    if resource_dimension not in RESOURCE_DIMENSIONS:
+        raise ValueError(
+            "Unsupported resource dimension: "
+            f"{resource_dimension}"
+        )
 
     cloudwatch = session.client("cloudwatch")
 
@@ -84,8 +98,8 @@ def collect_metrics(
                         "MetricName": metric_name,
                         "Dimensions": [
                             {
-                                "Name": "DBInstanceIdentifier",
-                                "Value": db_instance_identifier,
+                                "Name": resource_dimension,
+                                "Value": resource_id,
                             }
                         ],
                     },
@@ -147,8 +161,9 @@ def collect_metrics(
                 "source": "Amazon CloudWatch",
                 "namespace": "AWS/RDS",
                 "region": region_name,
-                "resource_type": "DBInstance",
-                "resource_id": db_instance_identifier,
+                "resource_type": RESOURCE_DIMENSIONS[resource_dimension],
+                "resource_dimension": resource_dimension,
+                "resource_id": resource_id,
                 "metric_name": metric_name,
                 "statistic": METRIC_CONFIG[metric_name]["statistic"],
                 "unit": METRIC_CONFIG[metric_name]["unit"],
@@ -212,20 +227,32 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--resource-id",
         "--db-instance-identifier",
+        dest="resource_id",
         required=True,
-        help="Amazon RDS DB instance identifier",
+        help="Amazon RDS DB instance or Aurora cluster identifier",
     )
+
+    parser.add_argument(
+        "--resource-dimension",
+        choices=list(RESOURCE_DIMENSIONS),
+        default="DBInstanceIdentifier",
+        help="CloudWatch resource dimension",
+    )
+
     parser.add_argument(
         "--profile",
         default="atlas-test",
         help="AWS CLI profile name",
     )
+
     parser.add_argument(
         "--region",
         default="ap-northeast-2",
         help="AWS Region",
     )
+
     parser.add_argument(
         "--metrics",
         nargs="+",
@@ -233,12 +260,14 @@ def parse_arguments() -> argparse.Namespace:
         default=list(METRIC_CONFIG),
         help="CloudWatch metrics to collect",
     )
+
     parser.add_argument(
         "--lookback-minutes",
         type=int,
         default=60,
         help="Metric lookback period in minutes",
     )
+
     parser.add_argument(
         "--period-seconds",
         type=int,
@@ -263,7 +292,8 @@ def main() -> None:
         payloads = collect_metrics(
             session=session,
             region_name=args.region,
-            db_instance_identifier=args.db_instance_identifier,
+            resource_dimension=args.resource_dimension,
+            resource_id=args.resource_id,
             metric_names=args.metrics,
             lookback_minutes=args.lookback_minutes,
             period_seconds=args.period_seconds,
@@ -281,6 +311,10 @@ def main() -> None:
         raise SystemExit(
             f"AWS profile not found: {error}"
         ) from error
+
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+
     except (ClientError, BotoCoreError) as error:
         raise SystemExit(
             f"AWS API request failed: {error}"

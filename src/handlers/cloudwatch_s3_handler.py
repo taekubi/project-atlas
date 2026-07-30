@@ -6,7 +6,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-from src.collectors.cloudwatch_metrics import METRIC_CONFIG
+from src.collectors.cloudwatch_metrics import (
+    METRIC_CONFIG,
+    RESOURCE_DIMENSIONS,
+)
 from src.pipelines.cloudwatch_s3_pipeline import run_pipeline
 
 
@@ -80,6 +83,33 @@ def _metric_names() -> list[str]:
     return metric_names
 
 
+def _resource_config() -> tuple[str, str]:
+    """Return validated CloudWatch resource configuration."""
+
+    resource_dimension = os.getenv(
+        "RESOURCE_DIMENSION",
+        "DBInstanceIdentifier",
+    )
+
+    if resource_dimension not in RESOURCE_DIMENSIONS:
+        raise ValueError(
+            "Unsupported resource dimension: "
+            f"{resource_dimension}"
+        )
+
+    resource_id = (
+        os.getenv("RESOURCE_ID")
+        or os.getenv("DB_INSTANCE_IDENTIFIER")
+    )
+
+    if not resource_id:
+        raise ValueError(
+            "Missing required environment variable: RESOURCE_ID"
+        )
+
+    return resource_dimension, resource_id
+
+
 def lambda_handler(
     event: dict[str, Any] | None,
     context: Any,
@@ -92,15 +122,14 @@ def lambda_handler(
     )
 
     bucket_name = _required_env("ATLAS_BUCKET")
-    db_instance_identifier = _required_env(
-        "DB_INSTANCE_IDENTIFIER"
-    )
+    resource_dimension, resource_id = _resource_config()
 
     results = run_pipeline(
         profile_name=None,
         region_name=region_name,
         bucket_name=bucket_name,
-        db_instance_identifier=db_instance_identifier,
+        resource_dimension=resource_dimension,
+        resource_id=resource_id,
         metric_names=_metric_names(),
         lookback_minutes=_positive_int_env(
             "LOOKBACK_MINUTES",
@@ -133,7 +162,8 @@ def lambda_handler(
         "request_id": request_id,
         "region": region_name,
         "bucket": bucket_name,
-        "db_instance_identifier": db_instance_identifier,
+        "resource_dimension": resource_dimension,
+        "resource_id": resource_id,
         "uploaded_count": len(results),
         "results": results,
     }

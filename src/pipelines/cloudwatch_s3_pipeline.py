@@ -11,6 +11,7 @@ from botocore.exceptions import BotoCoreError, ClientError, ProfileNotFound
 
 from src.collectors.cloudwatch_metrics import (
     METRIC_CONFIG,
+    RESOURCE_DIMENSIONS,
     collect_metrics,
     create_session,
     save_json,
@@ -22,7 +23,8 @@ def run_pipeline(
     profile_name: str | None,
     region_name: str,
     bucket_name: str,
-    db_instance_identifier: str,
+    resource_dimension: str,
+    resource_id: str,
     metric_names: list[str],
     lookback_minutes: int,
     period_seconds: int,
@@ -39,7 +41,8 @@ def run_pipeline(
     payloads = collect_metrics(
         session=session,
         region_name=region_name,
-        db_instance_identifier=db_instance_identifier,
+        resource_dimension=resource_dimension,
+        resource_id=resource_id,
         metric_names=metric_names,
         lookback_minutes=lookback_minutes,
         period_seconds=period_seconds,
@@ -91,9 +94,18 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--resource-id",
         "--db-instance-identifier",
+        dest="resource_id",
         required=True,
-        help="Amazon RDS DB instance identifier",
+        help="Amazon RDS DB instance or Aurora cluster identifier",
+    )
+
+    parser.add_argument(
+        "--resource-dimension",
+        choices=list(RESOURCE_DIMENSIONS),
+        default="DBInstanceIdentifier",
+        help="CloudWatch resource dimension",
     )
     parser.add_argument(
         "--bucket",
@@ -153,7 +165,8 @@ def main() -> None:
             profile_name=args.profile,
             region_name=args.region,
             bucket_name=args.bucket,
-            db_instance_identifier=args.db_instance_identifier,
+            resource_dimension=args.resource_dimension,
+            resource_id=args.resource_id,
             metric_names=args.metrics,
             lookback_minutes=args.lookback_minutes,
             period_seconds=args.period_seconds,
