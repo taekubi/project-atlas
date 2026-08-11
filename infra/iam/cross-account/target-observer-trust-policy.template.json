@@ -1,0 +1,15 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TrustProjectAtlasLambdaRole",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::714933490352:role/project-atlas-lambda-role"
+      },
+      "Action": [
+        "sts:AssumeRole"
+      ]
+    }
+  ]
+}

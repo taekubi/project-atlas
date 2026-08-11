@@ -26,6 +26,19 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _optional_env(name: str) -> str | None:
+    """Return a normalized optional environment variable."""
+
+    raw_value = os.getenv(name)
+
+    if raw_value is None:
+        return None
+
+    value = raw_value.strip()
+
+    return value or None
+
+
 def _positive_int_env(
     name: str,
     default: int,
@@ -110,6 +123,34 @@ def _resource_config() -> tuple[str, str]:
     return resource_dimension, resource_id
 
 
+def _role_config() -> tuple[str | None, str | None, str]:
+    """Return validated cross-account role configuration."""
+
+    target_role_arn = _optional_env("TARGET_ROLE_ARN")
+    target_external_id = _optional_env("TARGET_EXTERNAL_ID")
+
+    role_session_name = os.getenv(
+        "ROLE_SESSION_NAME",
+        "project-atlas-cloudwatch",
+    ).strip()
+
+    if not role_session_name:
+        raise ValueError(
+            "ROLE_SESSION_NAME must not be empty"
+        )
+
+    if target_external_id and not target_role_arn:
+        raise ValueError(
+            "TARGET_EXTERNAL_ID requires TARGET_ROLE_ARN"
+        )
+
+    return (
+        target_role_arn,
+        target_external_id,
+        role_session_name,
+    )
+
+
 def lambda_handler(
     event: dict[str, Any] | None,
     context: Any,
@@ -123,6 +164,12 @@ def lambda_handler(
 
     bucket_name = _required_env("ATLAS_BUCKET")
     resource_dimension, resource_id = _resource_config()
+
+    (
+        target_role_arn,
+        target_external_id,
+        role_session_name,
+    ) = _role_config()
 
     results = run_pipeline(
         profile_name=None,
@@ -149,6 +196,9 @@ def lambda_handler(
             "S3_PREFIX",
             "raw/cloudwatch",
         ),
+        target_role_arn=target_role_arn,
+        target_external_id=target_external_id,
+        role_session_name=role_session_name,
     )
 
     request_id = (
@@ -162,6 +212,12 @@ def lambda_handler(
         "request_id": request_id,
         "region": region_name,
         "bucket": bucket_name,
+        "credential_mode": (
+            "assume-role"
+            if target_role_arn
+            else "default"
+        ),
+        "target_role_arn": target_role_arn,
         "resource_dimension": resource_dimension,
         "resource_id": resource_id,
         "uploaded_count": len(results),

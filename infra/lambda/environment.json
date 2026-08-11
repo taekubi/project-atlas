@@ -7,6 +7,7 @@
     "LOOKBACK_MINUTES": "15",
     "PERIOD_SECONDS": "300",
     "OUTPUT_ROOT": "/tmp/cloudwatch",
-    "S3_PREFIX": "raw/cloudwatch"
+    "S3_PREFIX": "raw/cloudwatch",
+    "ROLE_SESSION_NAME": "project-atlas-cloudwatch"
   }
 }
