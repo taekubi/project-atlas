@@ -221,3 +221,6 @@ data/processed/
 
 # Local pipeline test output
 tmp/
+
+# Project Atlas local environment configuration
+config/atlas.local.toml

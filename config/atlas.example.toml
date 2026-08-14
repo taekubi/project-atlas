@@ -1,0 +1,21 @@
+[atlas]
+storage_region = "ap-northeast-2"
+bucket = "project-atlas-data-<ATLAS_ACCOUNT_ID>-ap-northeast-2"
+s3_prefix = "raw/cloudwatch"
+source_root = "tmp/rds-discovery-metrics"
+
+[collection]
+lookback_minutes = 15
+period_seconds = 300
+metrics = [
+    "CPUUtilization"
+]
+
+[[targets]]
+name = "example-target"
+account_id = "<TARGET_ACCOUNT_ID>"
+role_name = "project-atlas-rds-observer-role"
+regions = [
+    "ap-northeast-2"
+]
+enabled = true
