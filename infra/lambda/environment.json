@@ -1,13 +1,9 @@
 {
   "Variables": {
     "ATLAS_BUCKET": "project-atlas-data-714933490352-ap-northeast-2",
-    "RESOURCE_DIMENSION": "DBInstanceIdentifier",
-    "RESOURCE_ID": "secret-test-maria",
-    "METRICS": "CPUUtilization",
-    "LOOKBACK_MINUTES": "15",
-    "PERIOD_SECONDS": "300",
-    "OUTPUT_ROOT": "/tmp/cloudwatch",
-    "S3_PREFIX": "raw/cloudwatch",
-    "ROLE_SESSION_NAME": "project-atlas-cloudwatch"
+    "ATLAS_STORAGE_REGION": "ap-northeast-2",
+    "ATLAS_CONFIG_KEY": "config/atlas.toml",
+    "ATLAS_CONFIG_LOCAL_PATH": "/tmp/atlas.toml",
+    "ATLAS_OUTPUT_ROOT": "/tmp/rds-discovery-metrics"
   }
 }
