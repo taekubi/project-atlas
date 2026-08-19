@@ -7,9 +7,7 @@ source_root = "tmp/rds-discovery-metrics"
 [collection]
 lookback_minutes = 15
 period_seconds = 300
-metrics = [
-    "CPUUtilization"
-]
+metric_profile = "operational-v1"
 
 [[targets]]
 name = "example-target"

@@ -25,6 +25,9 @@ from src.collectors.cloudwatch_metrics import (
 from src.collectors.rds_inventory import (
     collect_rds_inventory,
 )
+from src.collectors.metric_profiles import (
+    resolve_metric_profile,
+)
 from src.config.atlas_config import (
     AtlasConfig,
     TargetSettings,
@@ -134,16 +137,77 @@ def collect_target_region(
     )
 
     results: list[dict[str, Any]] = []
+    resource_summaries: list[dict[str, Any]] = []
 
     for resource in resources:
         resource_id = resource["resource_id"]
+
+        if config.collection.uses_metric_profile:
+            profile_name = (
+                config.collection.metric_profile
+            )
+
+            if profile_name is None:
+                raise ValueError(
+                    "Metric profile configuration "
+                    "is unexpectedly empty"
+                )
+
+            profile_selection = (
+                resolve_metric_profile(
+                    resource=resource,
+                    profile_name=profile_name,
+                )
+            )
+
+            metric_names = list(
+                profile_selection.metrics
+            )
+
+            metric_profile = (
+                profile_selection.profile_name
+            )
+
+            resource_profile = (
+                profile_selection.resource_profile
+            )
+
+        else:
+            metric_names = list(
+                config.collection.metrics
+            )
+
+            metric_profile = None
+            resource_profile = (
+                "explicit-metrics"
+            )
+
+        resource_summaries.append(
+            {
+                "resource_id": resource_id,
+                "engine": resource.get(
+                    "engine"
+                ),
+                "cluster_role": resource.get(
+                    "cluster_role"
+                ),
+                "metric_profile": metric_profile,
+                "resource_profile": (
+                    resource_profile
+                ),
+                "metric_count": len(
+                    metric_names
+                ),
+                "metrics": metric_names,
+            }
+        )
 
         payloads = collect_metrics(
             session=source_session,
             region_name=source_region,
             resource_dimension="DBInstanceIdentifier",
             resource_id=resource_id,
-            metric_names=config.collection.metrics,
+            metric_names=metric_names,
             lookback_minutes=(
                 config.collection.lookback_minutes
             ),
@@ -175,6 +239,14 @@ def collect_target_region(
                 resource.get(
                     "cluster_role"
                 )
+            )
+
+            payload["metric_profile"] = (
+                metric_profile
+            )
+
+            payload["resource_profile"] = (
+                resource_profile
             )
 
             local_path = save_json(
@@ -217,6 +289,10 @@ def collect_target_region(
                     "cluster_role": resource.get(
                         "cluster_role"
                     ),
+                    "metric_profile": metric_profile,
+                    "resource_profile": (
+                        resource_profile
+                    ),
                     "metric_name": payload[
                         "metric_name"
                     ],
@@ -245,6 +321,9 @@ def collect_target_region(
         ),
         "selected_instance_count": len(
             resources
+        ),
+        "resource_summaries": (
+            resource_summaries
         ),
         "uploaded_count": len(results),
         "results": results,
