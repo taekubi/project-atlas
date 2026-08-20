@@ -150,19 +150,30 @@ def parse_command_text(
     return target_name, date
 
 
-def resolve_target(
+def resolve_query_scope(
     config: AtlasConfig,
-    target_name: str,
-) -> TargetSettings:
-    """Look up an enabled Atlas target by its configured name."""
+    name: str,
+) -> tuple[TargetSettings, str | None]:
+    """Resolve a /atlas argument to a target account and optional resource.
+
+    If `name` matches a configured Atlas target's name, the command asks
+    for every resource in that account/region. Otherwise `name` is treated
+    as a resource_id (e.g. an RDS/Aurora identifier like "watchcon-a") and
+    scoped to Atlas's first enabled target -- there is only one configured
+    account today, so this does not search across multiple accounts; revisit
+    if that changes.
+    """
 
     for target in config.enabled_targets:
-        if target.name == target_name:
-            return target
+        if target.name == name:
+            return target, None
 
-    raise SlackCommandError(
-        f"등록되지 않은 target입니다: {target_name}"
-    )
+    if not config.enabled_targets:
+        raise SlackCommandError(
+            "등록된 target이 없습니다."
+        )
+
+    return config.enabled_targets[0], name
 
 
 def format_slack_message(
@@ -431,8 +442,10 @@ def handle_query_job(
             ),
         )
 
-        target = resolve_target(
-            config, target_name
+        target, resource_filter = (
+            resolve_query_scope(
+                config, target_name
+            )
         )
 
         athena_session = create_athena_session(
@@ -453,6 +466,7 @@ def handle_query_job(
             account_id=target.account_id,
             region=target.regions[0],
             date=date,
+            resource_id=resource_filter,
             model_id=model_id,
             database=athena_database,
             table=athena_table,
