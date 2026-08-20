@@ -217,14 +217,37 @@ def _decode_body(
     return body
 
 
+def _get_slack_signing_secret() -> str:
+    """Fetch the Slack signing secret from SSM Parameter Store.
+
+    Stored as a SecureString rather than a plain Lambda environment
+    variable so it never appears in the function configuration or in
+    deployment tooling output.
+    """
+
+    parameter_name = os.getenv(
+        "SLACK_SIGNING_SECRET_PARAM",
+        "/project-atlas/slack/signing-secret",
+    ).strip()
+
+    ssm = boto3.client("ssm")
+
+    response = ssm.get_parameter(
+        Name=parameter_name,
+        WithDecryption=True,
+    )
+
+    return response["Parameter"]["Value"]
+
+
 def handle_slash_command(
     event: dict[str, Any],
     context: Any,
 ) -> dict[str, Any]:
     """Verify, parse, and dispatch a /atlas slash command."""
 
-    signing_secret = _required_env(
-        "SLACK_SIGNING_SECRET"
+    signing_secret = (
+        _get_slack_signing_secret()
     )
 
     headers = {

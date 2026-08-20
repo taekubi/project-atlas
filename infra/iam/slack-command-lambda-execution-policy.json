@@ -12,6 +12,16 @@
       ]
     },
     {
+      "Sid": "DecryptSlackSigningSecret",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt"
+      ],
+      "Resource": [
+        "arn:aws:kms:ap-northeast-2:714933490352:key/990aae36-fd29-4a37-85a2-9b62e8c6555d"
+      ]
+    },
+    {
       "Sid": "InvokeDbHealthJobFunction",
       "Effect": "Allow",
       "Action": [
