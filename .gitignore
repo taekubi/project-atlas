@@ -224,3 +224,9 @@ tmp/
 
 # Project Atlas local environment configuration
 config/atlas.local.toml
+
+# Personal working docs / reference images (not part of the codebase)
+PROJECT_ATLAS_KPI1_KPI2_COMPLETE_AI_HANDOFF.md
+Project_Atlas_전체_설명_2026-08-19.txt
+Sample_1.png
+Sample_2.png
