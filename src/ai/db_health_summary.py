@@ -29,6 +29,7 @@ from src.query.athena_client import (
     format_table,
 )
 from src.query.db_health import run_db_health_snapshot
+from src.query.live_health import fetch_live_health
 
 _DEFAULT_MODEL_ID = (
     "apac.anthropic.claude-3-5-sonnet-20241022-v2:0"
@@ -106,6 +107,54 @@ def summarize_db_health(
         account_id=account_id,
         region=region,
         date=date,
+    )
+
+    summary = invoke_model(
+        session=bedrock_session,
+        model_id=model_id,
+        system_prompt=_SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+    )
+
+    return rows, summary
+
+
+def summarize_live_db_health(
+    cloudwatch_session: boto3.Session,
+    bedrock_session: boto3.Session,
+    resource_id: str,
+    lookback_minutes: int,
+    model_id: str = _DEFAULT_MODEL_ID,
+) -> tuple[list[dict[str, str | None]], str]:
+    """Fetch a live DB Health Snapshot and return it with an AI-written summary.
+
+    Unlike summarize_db_health (Curated/Athena, day-granularity), this
+    calls CloudWatch directly for a recent lookback window, for
+    monitoring questions where batch latency is not acceptable.
+    """
+
+    row = fetch_live_health(
+        session=cloudwatch_session,
+        resource_id=resource_id,
+        lookback_minutes=lookback_minutes,
+    )
+
+    rows = [row]
+
+    label = (
+        f"resource_id={resource_id} "
+        f"lookback_minutes={lookback_minutes}"
+    )
+
+    user_prompt = "\n".join(
+        [
+            label,
+            "",
+            ", ".join(
+                f"{key}={value}"
+                for key, value in row.items()
+            ),
+        ]
     )
 
     summary = invoke_model(

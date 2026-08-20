@@ -99,6 +99,16 @@
         "arn:aws:bedrock:ap-northeast-2:714933490352:inference-profile/apac.anthropic.claude-3-5-sonnet-20241022-v2:0",
         "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
       ]
+    },
+    {
+      "Sid": "AssumeTargetObserverRoleForLiveMetrics",
+      "Effect": "Allow",
+      "Action": [
+        "sts:AssumeRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::826846563965:role/project-atlas-rds-observer-role"
+      ]
     }
   ]
 }
