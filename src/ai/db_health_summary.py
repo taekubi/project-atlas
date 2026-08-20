@@ -141,6 +141,22 @@ def summarize_live_db_health(
 
     rows = [row]
 
+    metric_columns = [
+        key
+        for key in row
+        if key != "resource_id"
+    ]
+
+    if all(
+        row.get(column) is None
+        for column in metric_columns
+    ):
+        return rows, (
+            f"'{resource_id}'에 대한 CloudWatch 데이터를 "
+            "찾을 수 없습니다. 정확한 DB/인스턴스 식별자인지 "
+            "확인해주세요."
+        )
+
     label = (
         f"resource_id={resource_id} "
         f"lookback_minutes={lookback_minutes}"

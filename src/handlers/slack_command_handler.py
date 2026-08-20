@@ -35,6 +35,10 @@ from src.ai.db_health_summary import (
     summarize_db_health,
     summarize_live_db_health,
 )
+from src.ai.intent_parser import (
+    IntentParseError,
+    parse_health_intent,
+)
 from src.auth.aws_session import (
     create_target_session,
 )
@@ -284,7 +288,14 @@ def handle_slash_command(
     event: dict[str, Any],
     context: Any,
 ) -> dict[str, Any]:
-    """Verify, parse, and dispatch a /atlas slash command."""
+    """Verify a /atlas slash command and dispatch it for processing.
+
+    Parsing (the fixed grammar, and its Bedrock-based natural-language
+    fallback) happens entirely in handle_query_job, not here -- a
+    synchronous Bedrock call here would risk missing Slack's 3-second
+    ack window on top of Lambda cold-start latency. This handler only
+    verifies the request and hands the raw text off.
+    """
 
     signing_secret = (
         _get_slack_signing_secret()
@@ -316,16 +327,17 @@ def handle_slash_command(
         "response_url", [""]
     )[0]
 
-    try:
-        target_name, mode, value = (
-            parse_command_text(command_text)
-        )
-    except SlackCommandError as error:
+    if not command_text.strip():
         return _json_response(
             200,
             {
                 "response_type": "ephemeral",
-                "text": str(error),
+                "text": (
+                    "사용법: /atlas <DB 이름> [질문] "
+                    "(예: /atlas watchcon-a 최근 30분 "
+                    "상태 확인해줘, 또는 /atlas health "
+                    "watchcon-a 2026-08-19)"
+                ),
             },
         )
 
@@ -340,29 +352,17 @@ def handle_slash_command(
         InvocationType="Event",
         Payload=json.dumps(
             {
-                "target_name": target_name,
-                "mode": mode,
-                "value": value,
+                "command_text": command_text,
                 "response_url": response_url,
             }
         ).encode("utf-8"),
-    )
-
-    ack_text = (
-        f"{target_name} 최근 {value}분 상태를 "
-        "조회하고 있습니다..."
-        if mode == "live"
-        else (
-            f"{target_name} 상태를 조회하고 있습니다... "
-            f"({value})"
-        )
     )
 
     return _json_response(
         200,
         {
             "response_type": "ephemeral",
-            "text": ack_text,
+            "text": "질문을 확인하고 있습니다...",
         },
     )
 
@@ -428,11 +428,15 @@ def handle_query_job(
     event: dict[str, Any],
     context: Any,
 ) -> dict[str, Any]:
-    """Run the DB Health Summary and post the result to Slack."""
+    """Parse a /atlas request, run the DB Health Summary, and reply.
 
-    target_name = event["target_name"]
-    mode = event["mode"]
-    value = event["value"]
+    Parses `command_text` with the fixed "health <target> [...]" grammar
+    first; if that does not match, falls back to Bedrock-based natural
+    -language parsing (src.ai.intent_parser) so free-form questions like
+    "watchcon-a 최근 30분 상태 확인해줘" work too.
+    """
+
+    command_text = event["command_text"]
     response_url = event["response_url"]
 
     bucket_name = _required_env(
@@ -471,6 +475,28 @@ def handle_query_job(
     ).strip()
 
     try:
+        bedrock_session = create_bedrock_session(
+            profile_name=None,
+            region_name=bedrock_region,
+        )
+
+        try:
+            target_name, mode, value = (
+                parse_command_text(
+                    command_text
+                )
+            )
+        except SlackCommandError:
+            target_name, mode, value = (
+                parse_health_intent(
+                    bedrock_session=(
+                        bedrock_session
+                    ),
+                    text=command_text,
+                    model_id=model_id,
+                )
+            )
+
         config = _download_config(
             bucket_name=bucket_name,
             object_key=config_key,
@@ -484,11 +510,6 @@ def handle_query_job(
             resolve_query_scope(
                 config, target_name
             )
-        )
-
-        bedrock_session = create_bedrock_session(
-            profile_name=None,
-            region_name=bedrock_region,
         )
 
         if mode == "live":
@@ -567,6 +588,7 @@ def handle_query_job(
 
     except (
         SlackCommandError,
+        IntentParseError,
         AthenaQueryError,
         BedrockInvocationError,
         ValueError,
