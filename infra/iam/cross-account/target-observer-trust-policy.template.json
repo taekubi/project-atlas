@@ -5,7 +5,10 @@
       "Sid": "TrustProjectAtlasLambdaRole",
       "Effect": "Allow",
       "Principal": {
-        "AWS": "arn:aws:iam::714933490352:role/project-atlas-lambda-role"
+        "AWS": [
+          "arn:aws:iam::714933490352:role/project-atlas-lambda-role",
+          "arn:aws:iam::714933490352:role/project-atlas-slack-query-role"
+        ]
       },
       "Action": [
         "sts:AssumeRole"
