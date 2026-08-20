@@ -42,6 +42,13 @@ from src.ai.intent_parser import (
 from src.auth.aws_session import (
     create_target_session,
 )
+from src.collectors.rds_inventory import (
+    collect_rds_inventory,
+)
+from src.collectors.resource_resolver import (
+    ResourceResolutionError,
+    resolve_resource_ids,
+)
 from src.config.atlas_config import (
     AtlasConfig,
     TargetSettings,
@@ -179,30 +186,105 @@ def parse_command_text(
     )
 
 
-def resolve_query_scope(
+def _find_config_target(
     config: AtlasConfig,
     name: str,
-) -> tuple[TargetSettings, str | None]:
-    """Resolve a /atlas argument to a target account and optional resource.
-
-    If `name` matches a configured Atlas target's name, the command asks
-    for every resource in that account/region. Otherwise `name` is treated
-    as a resource_id (e.g. an RDS/Aurora identifier like "watchcon-a") and
-    scoped to Atlas's first enabled target -- there is only one configured
-    account today, so this does not search across multiple accounts; revisit
-    if that changes.
-    """
+) -> TargetSettings | None:
+    """Look up an enabled Atlas target by its configured (account) name."""
 
     for target in config.enabled_targets:
         if target.name == name:
+            return target
+
+    return None
+
+
+def _build_target_session(
+    target: TargetSettings,
+) -> boto3.Session:
+    """Build the cross-account session for a target's AWS account."""
+
+    base_session = boto3.Session(
+        region_name=target.regions[0],
+    )
+
+    return create_target_session(
+        base_session=base_session,
+        region_name=target.regions[0],
+        role_arn=target.role_arn,
+    )
+
+
+def resolve_query_scope(
+    config: AtlasConfig,
+    name: str,
+    mode: str,
+) -> tuple[TargetSettings, list[str] | None]:
+    """Resolve a /atlas argument to a target account and resource_ids.
+
+    If `name` matches a configured Atlas target's (account-level) name:
+    - for a historical/Athena query (mode "date"), no resource filter is
+      needed -- Athena can query the whole account directly
+    - for a live/CloudWatch query (mode "live"), CloudWatch has no
+      "every instance" query, so every instance in that account is
+      discovered and listed explicitly
+
+    Otherwise `name` is resolved against live RDS/Aurora discovery
+    (src.collectors.resource_resolver) instead of requiring an exact
+    resource_id -- a cluster name resolves to every member instance
+    (writer + reader together), and a loose/partial name is matched by
+    substring, so a user does not have to memorize exact identifiers.
+    Scoped to Atlas's first enabled target -- there is only one
+    configured account today; revisit if that changes.
+    """
+
+    target = _find_config_target(config, name)
+
+    if target is not None:
+        if mode != "live":
             return target, None
+
+        inventory = collect_rds_inventory(
+            session=_build_target_session(
+                target
+            ),
+        )
+
+        resource_ids = [
+            instance["identifier"]
+            for instance in inventory[
+                "instances"
+            ]
+            if instance.get("identifier")
+        ]
+
+        if not resource_ids:
+            raise SlackCommandError(
+                f"'{name}' 계정에서 발견된 DB "
+                "인스턴스가 없습니다."
+            )
+
+        return target, resource_ids
 
     if not config.enabled_targets:
         raise SlackCommandError(
             "등록된 target이 없습니다."
         )
 
-    return config.enabled_targets[0], name
+    query_target = config.enabled_targets[0]
+
+    inventory = collect_rds_inventory(
+        session=_build_target_session(
+            query_target
+        ),
+    )
+
+    resource_ids = resolve_resource_ids(
+        name=name,
+        inventory=inventory,
+    )
+
+    return query_target, resource_ids
 
 
 def format_slack_message(
@@ -522,37 +604,22 @@ def handle_query_job(
             ),
         )
 
-        target, resource_filter = (
+        target, resource_ids = (
             resolve_query_scope(
-                config, target_name
+                config, target_name, mode
             )
         )
 
-        if mode == "live":
-            if resource_filter is None:
-                raise SlackCommandError(
-                    "실시간 조회는 계정 전체가 아니라 "
-                    "개별 리소스 ID로만 가능합니다. "
-                    "예: /atlas health watchcon-a 30m"
-                )
+        athena_session = create_athena_session(
+            profile_name=None,
+            region_name=storage_region,
+        )
 
+        if mode == "live":
             lookback_minutes = int(value)
 
-            base_session = boto3.Session(
-                region_name=target.regions[0],
-            )
             cloudwatch_session = (
-                create_target_session(
-                    base_session=base_session,
-                    region_name=target.regions[0],
-                    role_arn=target.role_arn,
-                )
-            )
-            athena_session = (
-                create_athena_session(
-                    profile_name=None,
-                    region_name=storage_region,
-                )
+                _build_target_session(target)
             )
 
             rows, summary = (
@@ -571,7 +638,7 @@ def handle_query_job(
                     ),
                     account_id=target.account_id,
                     region=target.regions[0],
-                    resource_id=resource_filter,
+                    resource_ids=resource_ids,
                     lookback_minutes=(
                         lookback_minutes
                     ),
@@ -587,13 +654,6 @@ def handle_query_job(
         else:
             date = value
 
-            athena_session = (
-                create_athena_session(
-                    profile_name=None,
-                    region_name=storage_region,
-                )
-            )
-
             rows, summary = summarize_db_health(
                 athena_session=athena_session,
                 bedrock_session=bedrock_session,
@@ -603,7 +663,7 @@ def handle_query_job(
                 account_id=target.account_id,
                 region=target.regions[0],
                 date=date,
-                resource_id=resource_filter,
+                resource_ids=resource_ids,
                 model_id=model_id,
                 database=athena_database,
                 table=athena_table,
@@ -622,6 +682,7 @@ def handle_query_job(
     except (
         SlackCommandError,
         IntentParseError,
+        ResourceResolutionError,
         AthenaQueryError,
         BedrockInvocationError,
         ValueError,

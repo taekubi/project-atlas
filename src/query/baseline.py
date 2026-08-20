@@ -73,7 +73,7 @@ def build_baseline_query(
     region: str,
     start_date: str,
     end_date: str,
-    resource_id: str | None = None,
+    resource_ids: list[str] | None = None,
     database: str = _DEFAULT_DATABASE,
     table: str = _DEFAULT_TABLE,
 ) -> str:
@@ -86,10 +86,16 @@ def build_baseline_query(
 
     resource_filter = ""
 
-    if resource_id is not None:
-        validate_resource_id(resource_id)
+    if resource_ids:
+        for resource_id in resource_ids:
+            validate_resource_id(resource_id)
+
+        quoted_ids = ", ".join(
+            f"'{resource_id}'"
+            for resource_id in resource_ids
+        )
         resource_filter = (
-            f"AND resource_id = '{resource_id}'"
+            f"AND resource_id IN ({quoted_ids})"
         )
 
     select_columns = ",\n    ".join(
@@ -126,7 +132,7 @@ def run_baseline(
     region: str,
     start_date: str,
     end_date: str,
-    resource_id: str | None = None,
+    resource_ids: list[str] | None = None,
     database: str = _DEFAULT_DATABASE,
     table: str = _DEFAULT_TABLE,
     workgroup: str = "primary",
@@ -138,7 +144,7 @@ def run_baseline(
         region=region,
         start_date=start_date,
         end_date=end_date,
-        resource_id=resource_id,
+        resource_ids=resource_ids,
         database=database,
         table=table,
     )

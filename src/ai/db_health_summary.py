@@ -125,7 +125,7 @@ def _fetch_baseline_safe(
     region: str,
     start_date: str,
     end_date: str,
-    resource_id: str | None,
+    resource_ids: list[str] | None,
     database: str,
     table: str,
     workgroup: str,
@@ -145,7 +145,7 @@ def _fetch_baseline_safe(
             region=region,
             start_date=start_date,
             end_date=end_date,
-            resource_id=resource_id,
+            resource_ids=resource_ids,
             database=database,
             table=table,
             workgroup=workgroup,
@@ -161,7 +161,7 @@ def summarize_db_health(
     account_id: str,
     region: str,
     date: str,
-    resource_id: str | None = None,
+    resource_ids: list[str] | None = None,
     model_id: str = _DEFAULT_MODEL_ID,
     database: str = "project_atlas",
     table: str = "cloudwatch_metrics",
@@ -178,7 +178,7 @@ def summarize_db_health(
         account_id=account_id,
         region=region,
         date=date,
-        resource_id=resource_id,
+        resource_ids=resource_ids,
         database=database,
         table=table,
         workgroup=workgroup,
@@ -199,7 +199,7 @@ def summarize_db_health(
         region=region,
         start_date=baseline_start_date,
         end_date=date,
-        resource_id=resource_id,
+        resource_ids=resource_ids,
         database=database,
         table=table,
         workgroup=workgroup,
@@ -231,7 +231,7 @@ def summarize_live_db_health(
     output_location: str,
     account_id: str,
     region: str,
-    resource_id: str,
+    resource_ids: list[str],
     lookback_minutes: int,
     model_id: str = _DEFAULT_MODEL_ID,
     database: str = "project_atlas",
@@ -246,32 +246,37 @@ def summarize_live_db_health(
     Unlike summarize_db_health (Curated/Athena, day-granularity), the
     current reading comes from CloudWatch directly for a recent lookback
     window, since batch latency is not acceptable for a monitoring
-    question. The historical baseline it is compared against, however,
-    still comes from Curated/Athena (account_id/region/output_location
-    are only used for that baseline lookup) -- best-effort, since a
-    missing baseline should not block a live reading.
+    question. resource_ids can be more than one (e.g. every member of a
+    cluster resolved by name) -- each gets its own CloudWatch call and
+    row, summarized together in one Bedrock call. The historical
+    baseline compared against still comes from Curated/Athena
+    (account_id/region/output_location are only used for that baseline
+    lookup) -- best-effort, since a missing baseline should not block a
+    live reading.
     """
 
-    row = fetch_live_health(
-        session=cloudwatch_session,
-        resource_id=resource_id,
-        lookback_minutes=lookback_minutes,
-    )
-
-    rows = [row]
-
-    metric_columns = [
-        key
-        for key in row
-        if key != "resource_id"
+    rows = [
+        fetch_live_health(
+            session=cloudwatch_session,
+            resource_id=resource_id,
+            lookback_minutes=lookback_minutes,
+        )
+        for resource_id in resource_ids
     ]
 
-    if all(
-        row.get(column) is None
-        for column in metric_columns
-    ):
+    def _has_any_data(
+        row: dict[str, str | None],
+    ) -> bool:
+        return any(
+            value is not None
+            for key, value in row.items()
+            if key != "resource_id"
+        )
+
+    if not any(_has_any_data(row) for row in rows):
+        joined_ids = ", ".join(resource_ids)
         return rows, (
-            f"'{resource_id}'에 대한 CloudWatch 데이터를 "
+            f"'{joined_ids}'에 대한 CloudWatch 데이터를 "
             "찾을 수 없습니다. 정확한 DB/인스턴스 식별자인지 "
             "확인해주세요."
         )
@@ -291,17 +296,16 @@ def summarize_live_db_health(
         region=region,
         start_date=start_date,
         end_date=end_date,
-        resource_id=resource_id,
+        resource_ids=resource_ids,
         database=database,
         table=table,
         workgroup=workgroup,
     )
 
     rows = _merge_baseline(rows, baseline_rows)
-    row = rows[0]
 
     label = (
-        f"resource_id={resource_id} "
+        f"resource_ids={', '.join(resource_ids)} "
         f"lookback_minutes={lookback_minutes}"
     )
 
@@ -309,10 +313,13 @@ def summarize_live_db_health(
         [
             label,
             "",
-            ", ".join(
-                f"{key}={value}"
-                for key, value in row.items()
-            ),
+            *[
+                ", ".join(
+                    f"{key}={value}"
+                    for key, value in row.items()
+                )
+                for row in rows
+            ],
         ]
     )
 
@@ -431,7 +438,11 @@ def main() -> None:
             account_id=args.account_id,
             region=args.target_region,
             date=args.date,
-            resource_id=args.resource_id,
+            resource_ids=(
+                [args.resource_id]
+                if args.resource_id
+                else None
+            ),
             model_id=args.model_id,
             database=args.database,
             table=args.table,
