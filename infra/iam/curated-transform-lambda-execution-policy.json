@@ -1,0 +1,84 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadRawCloudWatchData",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::project-atlas-data-714933490352-ap-northeast-2/raw/cloudwatch/*"
+      ]
+    },
+    {
+      "Sid": "WriteCuratedCloudWatchData",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::project-atlas-data-714933490352-ap-northeast-2/curated/cloudwatch/*"
+      ]
+    },
+    {
+      "Sid": "ListAtlasDataBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::project-atlas-data-714933490352-ap-northeast-2"
+      ],
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "raw/cloudwatch/*",
+            "athena-results/*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ReadWriteAthenaResults",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::project-atlas-data-714933490352-ap-northeast-2/athena-results/*"
+      ]
+    },
+    {
+      "Sid": "RunAthenaRepairQuery",
+      "Effect": "Allow",
+      "Action": [
+        "athena:StartQueryExecution",
+        "athena:GetQueryExecution",
+        "athena:GetQueryResults",
+        "athena:StopQueryExecution"
+      ],
+      "Resource": [
+        "arn:aws:athena:ap-northeast-2:714933490352:workgroup/primary"
+      ]
+    },
+    {
+      "Sid": "RepairGlueCatalogPartitions",
+      "Effect": "Allow",
+      "Action": [
+        "glue:GetDatabase",
+        "glue:GetTable",
+        "glue:GetTables",
+        "glue:GetPartition",
+        "glue:GetPartitions",
+        "glue:BatchCreatePartition"
+      ],
+      "Resource": [
+        "arn:aws:glue:ap-northeast-2:714933490352:catalog",
+        "arn:aws:glue:ap-northeast-2:714933490352:database/project_atlas",
+        "arn:aws:glue:ap-northeast-2:714933490352:table/project_atlas/cloudwatch_metrics"
+      ]
+    }
+  ]
+}
