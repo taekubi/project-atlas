@@ -70,17 +70,17 @@ def build_db_health_query(
     account_id: str,
     region: str,
     date: str,
-    resource_id: str | None = None,
+    resource_ids: list[str] | None = None,
     database: str = _DEFAULT_DATABASE,
     table: str = _DEFAULT_TABLE,
 ) -> str:
     """Build the DB Health Snapshot SQL for one account/region/day.
 
     Inputs are validated against strict patterns rather than passed through
-    Athena's ExecutionParameters, since account_id/region/date/resource_id
+    Athena's ExecutionParameters, since account_id/region/date/resource_ids
     will eventually be filled in from a Slack request rather than typed
-    by hand. When resource_id is given, the snapshot is narrowed to that
-    one resource; otherwise it covers every resource in the account/region.
+    by hand. When resource_ids is given, the snapshot is narrowed to those
+    resources; otherwise it covers every resource in the account/region.
     """
 
     validate_account_id(account_id)
@@ -89,10 +89,16 @@ def build_db_health_query(
 
     resource_filter = ""
 
-    if resource_id is not None:
-        validate_resource_id(resource_id)
+    if resource_ids:
+        for resource_id in resource_ids:
+            validate_resource_id(resource_id)
+
+        quoted_ids = ", ".join(
+            f"'{resource_id}'"
+            for resource_id in resource_ids
+        )
         resource_filter = (
-            f"AND resource_id = '{resource_id}'"
+            f"AND resource_id IN ({quoted_ids})"
         )
 
     return _DB_HEALTH_SNAPSHOT_TEMPLATE.format(
@@ -111,7 +117,7 @@ def run_db_health_snapshot(
     account_id: str,
     region: str,
     date: str,
-    resource_id: str | None = None,
+    resource_ids: list[str] | None = None,
     database: str = _DEFAULT_DATABASE,
     table: str = _DEFAULT_TABLE,
     workgroup: str = "primary",
@@ -122,7 +128,7 @@ def run_db_health_snapshot(
         account_id=account_id,
         region=region,
         date=date,
-        resource_id=resource_id,
+        resource_ids=resource_ids,
         database=database,
         table=table,
     )
@@ -220,7 +226,11 @@ def main() -> None:
             account_id=args.account_id,
             region=args.target_region,
             date=args.date,
-            resource_id=args.resource_id,
+            resource_ids=(
+                [args.resource_id]
+                if args.resource_id
+                else None
+            ),
             database=args.database,
             table=args.table,
             workgroup=args.workgroup,
