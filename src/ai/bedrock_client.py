@@ -88,6 +88,76 @@ def invoke_model(
     return "\n".join(text_blocks)
 
 
+def invoke_tool(
+    session: boto3.Session,
+    model_id: str,
+    system_prompt: str,
+    user_prompt: str,
+    tool_spec: dict,
+    max_tokens: int = _DEFAULT_MAX_TOKENS,
+    temperature: float = _DEFAULT_TEMPERATURE,
+) -> dict:
+    """Send a prompt with a forced tool call and return the tool's input.
+
+    Used for structured extraction (e.g. parsing free-form text into
+    query parameters) rather than free-text replies -- the model is
+    required to answer by calling the given tool, so the result is a
+    plain dict matching the tool's input schema instead of prose to
+    parse.
+    """
+
+    client = session.client("bedrock-runtime")
+
+    tool_name = tool_spec["toolSpec"]["name"]
+
+    response = client.converse(
+        modelId=model_id,
+        system=[
+            {
+                "text": system_prompt,
+            }
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "text": user_prompt,
+                    }
+                ],
+            }
+        ],
+        toolConfig={
+            "tools": [tool_spec],
+            "toolChoice": {
+                "tool": {
+                    "name": tool_name,
+                },
+            },
+        },
+        inferenceConfig={
+            "maxTokens": max_tokens,
+            "temperature": temperature,
+        },
+    )
+
+    content_blocks = response["output"]["message"]["content"]
+
+    for block in content_blocks:
+        tool_use = block.get("toolUse")
+
+        if (
+            tool_use
+            and tool_use.get("name") == tool_name
+        ):
+            return tool_use.get("input", {})
+
+    raise BedrockInvocationError(
+        "Bedrock response did not include a "
+        f"{tool_name} tool call"
+    )
+
+
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
 
