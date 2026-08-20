@@ -234,8 +234,9 @@ def resolve_query_scope(
     resource_id -- a cluster name resolves to every member instance
     (writer + reader together), and a loose/partial name is matched by
     substring, so a user does not have to memorize exact identifiers.
-    Scoped to Atlas's first enabled target -- there is only one
-    configured account today; revisit if that changes.
+    Every enabled target account is searched; a match in more than one
+    account raises SlackCommandError asking for a more specific name,
+    since a single query is scoped to one account/region.
     """
 
     target = _find_config_target(config, name)
@@ -271,20 +272,52 @@ def resolve_query_scope(
             "등록된 target이 없습니다."
         )
 
-    query_target = config.enabled_targets[0]
-
-    inventory = collect_rds_inventory(
-        session=_build_target_session(
-            query_target
-        ),
+    matched_target: TargetSettings | None = (
+        None
     )
+    resource_ids: list[str] | None = None
 
-    resource_ids = resolve_resource_ids(
-        name=name,
-        inventory=inventory,
-    )
+    for candidate_target in (
+        config.enabled_targets
+    ):
+        inventory = collect_rds_inventory(
+            session=_build_target_session(
+                candidate_target
+            ),
+        )
 
-    return query_target, resource_ids
+        try:
+            candidate_resource_ids = (
+                resolve_resource_ids(
+                    name=name,
+                    inventory=inventory,
+                )
+            )
+        except ResourceResolutionError:
+            continue
+
+        if matched_target is not None:
+            raise SlackCommandError(
+                f"'{name}'과(와) 일치하는 "
+                "리소스가 여러 계정"
+                f"({matched_target.name}, "
+                f"{candidate_target.name})"
+                "에서 발견되어 어느 계정인지 "
+                "특정할 수 없습니다. 더 "
+                "구체적인 이름으로 다시 "
+                "질문해주세요."
+            )
+
+        matched_target = candidate_target
+        resource_ids = candidate_resource_ids
+
+    if matched_target is None:
+        raise ResourceResolutionError(
+            f"'{name}'과(와) 일치하는 DB/클러스터를 "
+            "찾을 수 없습니다."
+        )
+
+    return matched_target, resource_ids
 
 
 def format_slack_message(
