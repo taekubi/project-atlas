@@ -78,6 +78,7 @@ def summarize_db_health(
     account_id: str,
     region: str,
     date: str,
+    resource_id: str | None = None,
     model_id: str = _DEFAULT_MODEL_ID,
     database: str = "project_atlas",
     table: str = "cloudwatch_metrics",
@@ -91,6 +92,7 @@ def summarize_db_health(
         account_id=account_id,
         region=region,
         date=date,
+        resource_id=resource_id,
         database=database,
         table=table,
         workgroup=workgroup,
@@ -182,6 +184,14 @@ def parse_arguments() -> argparse.Namespace:
         required=True,
         help="Target date partition to query (YYYY-MM-DD)",
     )
+    parser.add_argument(
+        "--resource-id",
+        default=None,
+        help=(
+            "Narrow the snapshot to one resource_id "
+            "(default: every resource in the account/region)"
+        ),
+    )
 
     return parser.parse_args()
 
@@ -213,6 +223,7 @@ def main() -> None:
             account_id=args.account_id,
             region=args.target_region,
             date=args.date,
+            resource_id=args.resource_id,
             model_id=args.model_id,
             database=args.database,
             table=args.table,

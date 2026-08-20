@@ -22,6 +22,7 @@ from src.query.athena_client import (
 _ACCOUNT_ID_PATTERN = re.compile(r"^\d{12}$")
 _REGION_PATTERN = re.compile(r"^[a-z]{2}-[a-z]+-\d$")
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_RESOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 _DEFAULT_DATABASE = "project_atlas"
 _DEFAULT_TABLE = "cloudwatch_metrics"
@@ -59,6 +60,7 @@ FROM {database}.{table}
 WHERE account_id = '{account_id}'
   AND region = '{region}'
   AND date = '{date}'
+  {resource_filter}
 GROUP BY resource_id, engine, cluster_role
 ORDER BY resource_id
 """
@@ -83,19 +85,34 @@ def build_db_health_query(
     account_id: str,
     region: str,
     date: str,
+    resource_id: str | None = None,
     database: str = _DEFAULT_DATABASE,
     table: str = _DEFAULT_TABLE,
 ) -> str:
     """Build the DB Health Snapshot SQL for one account/region/day.
 
     Inputs are validated against strict patterns rather than passed through
-    Athena's ExecutionParameters, since account_id/region/date will
-    eventually be filled in from a Slack request rather than typed by hand.
+    Athena's ExecutionParameters, since account_id/region/date/resource_id
+    will eventually be filled in from a Slack request rather than typed
+    by hand. When resource_id is given, the snapshot is narrowed to that
+    one resource; otherwise it covers every resource in the account/region.
     """
 
     _validate(account_id, _ACCOUNT_ID_PATTERN, "account_id")
     _validate(region, _REGION_PATTERN, "region")
     _validate(date, _DATE_PATTERN, "date")
+
+    resource_filter = ""
+
+    if resource_id is not None:
+        _validate(
+            resource_id,
+            _RESOURCE_ID_PATTERN,
+            "resource_id",
+        )
+        resource_filter = (
+            f"AND resource_id = '{resource_id}'"
+        )
 
     return _DB_HEALTH_SNAPSHOT_TEMPLATE.format(
         database=database,
@@ -103,6 +120,7 @@ def build_db_health_query(
         account_id=account_id,
         region=region,
         date=date,
+        resource_filter=resource_filter,
     ).strip()
 
 
@@ -112,6 +130,7 @@ def run_db_health_snapshot(
     account_id: str,
     region: str,
     date: str,
+    resource_id: str | None = None,
     database: str = _DEFAULT_DATABASE,
     table: str = _DEFAULT_TABLE,
     workgroup: str = "primary",
@@ -122,6 +141,7 @@ def run_db_health_snapshot(
         account_id=account_id,
         region=region,
         date=date,
+        resource_id=resource_id,
         database=database,
         table=table,
     )
@@ -190,6 +210,14 @@ def parse_arguments() -> argparse.Namespace:
         required=True,
         help="Target date partition to query (YYYY-MM-DD)",
     )
+    parser.add_argument(
+        "--resource-id",
+        default=None,
+        help=(
+            "Narrow the snapshot to one resource_id "
+            "(default: every resource in the account/region)"
+        ),
+    )
 
     return parser.parse_args()
 
@@ -211,6 +239,7 @@ def main() -> None:
             account_id=args.account_id,
             region=args.target_region,
             date=args.date,
+            resource_id=args.resource_id,
             database=args.database,
             table=args.table,
             workgroup=args.workgroup,
