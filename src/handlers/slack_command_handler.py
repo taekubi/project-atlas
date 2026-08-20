@@ -321,6 +321,22 @@ def handle_slash_command(
         ),
     )
 
+    if headers.get("x-slack-retry-num"):
+        # Slack retried because it didn't see our ack within its
+        # 3-second window (cold start + cross-Pacific network latency
+        # can exceed that even when our own Lambda duration is fine).
+        # The original invocation already dispatched the job -- or is
+        # about to -- so ack this retry without dispatching a
+        # duplicate one, which would double the Bedrock/Athena cost
+        # and could post two answers to the same thread.
+        return _json_response(
+            200,
+            {
+                "response_type": "ephemeral",
+                "text": "질문을 확인하고 있습니다...",
+            },
+        )
+
     form = urllib.parse.parse_qs(body)
     command_text = form.get("text", [""])[0]
     response_url = form.get(
