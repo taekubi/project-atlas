@@ -1,0 +1,25 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadSlackSigningSecret",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter"
+      ],
+      "Resource": [
+        "arn:aws:ssm:ap-northeast-2:714933490352:parameter/project-atlas/slack/signing-secret"
+      ]
+    },
+    {
+      "Sid": "InvokeDbHealthJobFunction",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:InvokeFunction"
+      ],
+      "Resource": [
+        "arn:aws:lambda:ap-northeast-2:714933490352:function:project-atlas-slack-db-health-job"
+      ]
+    }
+  ]
+}
