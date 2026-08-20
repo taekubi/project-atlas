@@ -15,7 +15,6 @@ interpretation and Slack formatting layers can be reused unchanged.
 
 from __future__ import annotations
 
-import re
 from datetime import (
     datetime,
     timedelta,
@@ -24,7 +23,9 @@ from datetime import (
 
 import boto3
 
-_RESOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+from src.query.validators import (
+    validate_resource_id,
+)
 
 _MIN_LOOKBACK_MINUTES = 1
 _MAX_LOOKBACK_MINUTES = 24 * 60
@@ -45,21 +46,6 @@ _METRIC_STATS: list[tuple[str, str, str]] = [
     ("AuroraReplicaLag", "Maximum", "aurora_replica_lag_max"),
     ("FreeStorageSpace", "Minimum", "free_storage_space_min_bytes"),
 ]
-
-
-def _validate_resource_id(
-    resource_id: str,
-) -> str:
-    """Validate a resource_id used as a CloudWatch dimension value."""
-
-    if not _RESOURCE_ID_PATTERN.match(
-        resource_id
-    ):
-        raise ValueError(
-            f"resource_id is invalid: {resource_id!r}"
-        )
-
-    return resource_id
 
 
 def _validate_lookback_minutes(
@@ -135,7 +121,7 @@ def fetch_live_health(
 ) -> dict[str, str | None]:
     """Fetch one live DB Health Snapshot row from CloudWatch."""
 
-    _validate_resource_id(resource_id)
+    validate_resource_id(resource_id)
     _validate_lookback_minutes(
         lookback_minutes
     )

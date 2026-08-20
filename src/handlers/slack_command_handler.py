@@ -532,20 +532,37 @@ def handle_query_job(
                     role_arn=target.role_arn,
                 )
             )
+            athena_session = (
+                create_athena_session(
+                    profile_name=None,
+                    region_name=storage_region,
+                )
+            )
 
             rows, summary = (
                 summarize_live_db_health(
                     cloudwatch_session=(
                         cloudwatch_session
                     ),
+                    athena_session=(
+                        athena_session
+                    ),
                     bedrock_session=(
                         bedrock_session
                     ),
+                    output_location=(
+                        athena_output_location
+                    ),
+                    account_id=target.account_id,
+                    region=target.regions[0],
                     resource_id=resource_filter,
                     lookback_minutes=(
                         lookback_minutes
                     ),
                     model_id=model_id,
+                    database=athena_database,
+                    table=athena_table,
+                    workgroup=athena_workgroup,
                 )
             )
 
