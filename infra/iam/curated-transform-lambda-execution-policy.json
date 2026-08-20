@@ -40,6 +40,16 @@
       }
     },
     {
+      "Sid": "VerifyAthenaOutputBucketLocation",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::project-atlas-data-714933490352-ap-northeast-2"
+      ]
+    },
+    {
       "Sid": "ReadWriteAthenaResults",
       "Effect": "Allow",
       "Action": [
