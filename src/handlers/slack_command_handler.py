@@ -18,14 +18,10 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import urllib.parse
 import urllib.request
-from datetime import (
-    datetime,
-    timedelta,
-    timezone,
-)
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +33,10 @@ from src.ai.bedrock_client import (
 )
 from src.ai.db_health_summary import (
     summarize_db_health,
+    summarize_live_db_health,
+)
+from src.auth.aws_session import (
+    create_target_session,
 )
 from src.config.atlas_config import (
     AtlasConfig,
@@ -47,10 +47,11 @@ from src.query.athena_client import (
     AthenaQueryError,
     create_session as create_athena_session,
 )
-
 _SIGNATURE_VERSION = "v0"
 _MAX_REQUEST_AGE_SECONDS = 300
-_KST = timezone(timedelta(hours=9))
+_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DURATION_PATTERN = re.compile(r"^(\d+)(m|h)$")
+_DEFAULT_LOOKBACK_MINUTES = 30
 
 
 class SlackSignatureError(Exception):
@@ -120,34 +121,58 @@ def verify_slack_signature(
         )
 
 
-def _today_kst() -> str:
-    """Return today's date in KST as YYYY-MM-DD."""
-
-    return datetime.now(_KST).strftime(
-        "%Y-%m-%d"
-    )
-
-
 def parse_command_text(
     text: str,
-) -> tuple[str, str]:
-    """Parse '/atlas health <target> [YYYY-MM-DD]' into (target, date)."""
+) -> tuple[str, str, str]:
+    """Parse '/atlas health <target> [YYYY-MM-DD | Nm | Nh]'.
+
+    Returns (target_name, mode, value):
+    - mode "date": value is a YYYY-MM-DD date -- historical, reads the
+      Curated/Athena layer (day granularity, batch latency)
+    - mode "live": value is a lookback window in minutes (as a string) --
+      reads CloudWatch directly. This is the default when no third
+      argument is given, since fast monitoring is the primary use case.
+    """
 
     parts = (text or "").strip().split()
 
     if len(parts) < 2 or parts[0] != "health":
         raise SlackCommandError(
-            "사용법: /atlas health <target> [YYYY-MM-DD]"
+            "사용법: /atlas health <target> [YYYY-MM-DD | 30m | 2h]"
         )
 
     target_name = parts[1]
-    date = (
-        parts[2]
-        if len(parts) > 2
-        else _today_kst()
+
+    if len(parts) <= 2:
+        return (
+            target_name,
+            "live",
+            str(_DEFAULT_LOOKBACK_MINUTES),
+        )
+
+    argument = parts[2]
+
+    if _DATE_PATTERN.match(argument):
+        return target_name, "date", argument
+
+    duration_match = _DURATION_PATTERN.match(
+        argument
     )
 
-    return target_name, date
+    if duration_match:
+        amount, unit = duration_match.groups()
+        minutes = int(amount) * (
+            60 if unit == "h" else 1
+        )
+        return (
+            target_name,
+            "live",
+            str(minutes),
+        )
+
+    raise SlackCommandError(
+        "날짜(YYYY-MM-DD) 또는 기간(예: 30m, 2h) 형식으로 입력해주세요."
+    )
 
 
 def resolve_query_scope(
@@ -178,20 +203,24 @@ def resolve_query_scope(
 
 def format_slack_message(
     target_name: str,
-    date: str,
+    label: str,
     rows: list[dict[str, str | None]],
     summary: str,
 ) -> str:
-    """Render a DB Health Summary as a Slack mrkdwn message."""
+    """Render a DB Health Summary as a Slack mrkdwn message.
+
+    `label` describes the query window shown next to the target name --
+    a date (historical) or a phrase like "최근 30분" (live).
+    """
 
     if not rows:
         return (
-            f"*{target_name}* ({date}) 조회 결과가 없습니다."
+            f"*{target_name}* ({label}) 조회 결과가 없습니다."
         )
 
     return "\n".join(
         [
-            f"*{target_name} DB Health* ({date})",
+            f"*{target_name} DB Health* ({label})",
             "",
             summary,
         ]
@@ -288,8 +317,8 @@ def handle_slash_command(
     )[0]
 
     try:
-        target_name, date = parse_command_text(
-            command_text
+        target_name, mode, value = (
+            parse_command_text(command_text)
         )
     except SlackCommandError as error:
         return _json_response(
@@ -312,20 +341,28 @@ def handle_slash_command(
         Payload=json.dumps(
             {
                 "target_name": target_name,
-                "date": date,
+                "mode": mode,
+                "value": value,
                 "response_url": response_url,
             }
         ).encode("utf-8"),
+    )
+
+    ack_text = (
+        f"{target_name} 최근 {value}분 상태를 "
+        "조회하고 있습니다..."
+        if mode == "live"
+        else (
+            f"{target_name} 상태를 조회하고 있습니다... "
+            f"({value})"
+        )
     )
 
     return _json_response(
         200,
         {
             "response_type": "ephemeral",
-            "text": (
-                f"{target_name} 상태를 조회하고 있습니다... "
-                f"({date})"
-            ),
+            "text": ack_text,
         },
     )
 
@@ -394,7 +431,8 @@ def handle_query_job(
     """Run the DB Health Summary and post the result to Slack."""
 
     target_name = event["target_name"]
-    date = event["date"]
+    mode = event["mode"]
+    value = event["value"]
     response_url = event["response_url"]
 
     bucket_name = _required_env(
@@ -448,34 +486,81 @@ def handle_query_job(
             )
         )
 
-        athena_session = create_athena_session(
-            profile_name=None,
-            region_name=storage_region,
-        )
         bedrock_session = create_bedrock_session(
             profile_name=None,
             region_name=bedrock_region,
         )
 
-        rows, summary = summarize_db_health(
-            athena_session=athena_session,
-            bedrock_session=bedrock_session,
-            output_location=(
-                athena_output_location
-            ),
-            account_id=target.account_id,
-            region=target.regions[0],
-            date=date,
-            resource_id=resource_filter,
-            model_id=model_id,
-            database=athena_database,
-            table=athena_table,
-            workgroup=athena_workgroup,
-        )
+        if mode == "live":
+            if resource_filter is None:
+                raise SlackCommandError(
+                    "실시간 조회는 계정 전체가 아니라 "
+                    "개별 리소스 ID로만 가능합니다. "
+                    "예: /atlas health watchcon-a 30m"
+                )
+
+            lookback_minutes = int(value)
+
+            base_session = boto3.Session(
+                region_name=target.regions[0],
+            )
+            cloudwatch_session = (
+                create_target_session(
+                    base_session=base_session,
+                    region_name=target.regions[0],
+                    role_arn=target.role_arn,
+                )
+            )
+
+            rows, summary = (
+                summarize_live_db_health(
+                    cloudwatch_session=(
+                        cloudwatch_session
+                    ),
+                    bedrock_session=(
+                        bedrock_session
+                    ),
+                    resource_id=resource_filter,
+                    lookback_minutes=(
+                        lookback_minutes
+                    ),
+                    model_id=model_id,
+                )
+            )
+
+            label = f"최근 {lookback_minutes}분"
+
+        else:
+            date = value
+
+            athena_session = (
+                create_athena_session(
+                    profile_name=None,
+                    region_name=storage_region,
+                )
+            )
+
+            rows, summary = summarize_db_health(
+                athena_session=athena_session,
+                bedrock_session=bedrock_session,
+                output_location=(
+                    athena_output_location
+                ),
+                account_id=target.account_id,
+                region=target.regions[0],
+                date=date,
+                resource_id=resource_filter,
+                model_id=model_id,
+                database=athena_database,
+                table=athena_table,
+                workgroup=athena_workgroup,
+            )
+
+            label = date
 
         text = format_slack_message(
             target_name=target_name,
-            date=date,
+            label=label,
             rows=rows,
             summary=summary,
         )
