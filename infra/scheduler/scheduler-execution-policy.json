@@ -8,7 +8,8 @@
         "lambda:InvokeFunction"
       ],
       "Resource": [
-        "arn:aws:lambda:ap-northeast-2:714933490352:function:project-atlas-cloudwatch-s3"
+        "arn:aws:lambda:ap-northeast-2:714933490352:function:project-atlas-cloudwatch-s3",
+        "arn:aws:lambda:ap-northeast-2:714933490352:function:project-atlas-curated-transform"
       ]
     }
   ]

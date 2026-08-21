@@ -147,7 +147,16 @@ def _fetch_rows(
     client: BaseClient,
     query_execution_id: str,
 ) -> list[dict[str, str | None]]:
-    """Fetch and flatten all result pages into row dictionaries."""
+    """Fetch and flatten all result pages into row dictionaries.
+
+    A page can legitimately carry no rows at all. A DDL statement such
+    as MSCK REPAIR TABLE returns an empty result set when there was
+    nothing to do -- so the curated refresh succeeds on the run that
+    adds partitions and then returns nothing on the next one, an hour
+    later, with no new data. Treating that as "no rows" rather than
+    reading a header out of an empty list is what keeps the scheduled
+    refresh from failing on every quiet hour.
+    """
 
     columns: list[str] | None = None
     rows: list[dict[str, str | None]] = []
@@ -160,6 +169,10 @@ def _fetch_rows(
         QueryExecutionId=query_execution_id,
     ):
         result_rows = page["ResultSet"]["Rows"]
+
+        if not result_rows:
+            continue
+
         start_index = 0
 
         if columns is None:
