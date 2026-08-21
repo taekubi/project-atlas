@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,14 @@ from src.collectors.cloudwatch_metrics import (
     METRIC_CONFIG,
     RESOURCE_DIMENSIONS,
 )
+from src.observability.logger import (
+    elapsed_ms,
+    get_logger,
+    request_id as context_request_id,
+)
 from src.pipelines.cloudwatch_s3_pipeline import run_pipeline
+
+logger = get_logger(__name__)
 
 
 def _required_env(name: str) -> str:
@@ -171,6 +179,28 @@ def lambda_handler(
         role_session_name,
     ) = _role_config()
 
+    started = time.perf_counter()
+
+    logger.info(
+        "metric_upload_started",
+        extra={
+            "request_id": (
+                context_request_id(context)
+            ),
+            "region": region_name,
+            "bucket": bucket_name,
+            "resource_dimension": (
+                resource_dimension
+            ),
+            "resource_id": resource_id,
+            "credential_mode": (
+                "assume-role"
+                if target_role_arn
+                else "default"
+            ),
+        },
+    )
+
     results = run_pipeline(
         profile_name=None,
         region_name=region_name,
@@ -205,6 +235,18 @@ def lambda_handler(
         getattr(context, "aws_request_id", None)
         if context is not None
         else None
+    )
+
+    logger.info(
+        "metric_upload_succeeded",
+        extra={
+            "request_id": request_id,
+            "region": region_name,
+            "bucket": bucket_name,
+            "resource_id": resource_id,
+            "uploaded_count": len(results),
+            "duration_ms": elapsed_ms(started),
+        },
     )
 
     return {

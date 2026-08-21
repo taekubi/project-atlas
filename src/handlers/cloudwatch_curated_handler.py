@@ -17,12 +17,18 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
 import boto3
 from botocore.client import BaseClient
 
+from src.observability.logger import (
+    elapsed_ms,
+    get_logger,
+    request_id as context_request_id,
+)
 from src.query.athena_client import (
     create_session as create_athena_session,
     run_query,
@@ -30,6 +36,8 @@ from src.query.athena_client import (
 from src.transforms.cloudwatch_curated import (
     transform_raw_to_curated,
 )
+
+logger = get_logger(__name__)
 
 _LOCAL_INPUT_ROOT = Path("/tmp/atlas-curated-input")
 _LOCAL_OUTPUT_ROOT = Path("/tmp/atlas-curated-output")
@@ -205,6 +213,24 @@ def lambda_handler(
         "primary",
     ).strip()
 
+    started = time.perf_counter()
+
+    logger.info(
+        "curated_refresh_started",
+        extra={
+            "request_id": (
+                context_request_id(context)
+            ),
+            "bucket": bucket_name,
+            "raw_prefix": raw_prefix,
+            "curated_prefix": curated_prefix,
+            "athena_table": (
+                f"{athena_database}."
+                f"{athena_table}"
+            ),
+        },
+    )
+
     _reset_local_dir(_LOCAL_INPUT_ROOT)
     _reset_local_dir(_LOCAL_OUTPUT_ROOT)
 
@@ -265,6 +291,32 @@ def lambda_handler(
         )
         if context is not None
         else None
+    )
+
+    logger.info(
+        "curated_refresh_succeeded",
+        extra={
+            "request_id": request_id,
+            "downloaded_raw_file_count": (
+                downloaded_count
+            ),
+            "skipped_legacy_file_count": (
+                skipped_legacy_count
+            ),
+            "curated_row_count": result[
+                "curated_row_count"
+            ],
+            "duplicates_removed": result[
+                "duplicates_removed"
+            ],
+            "parquet_file_count": result[
+                "parquet_file_count"
+            ],
+            "uploaded_curated_file_count": (
+                uploaded_count
+            ),
+            "duration_ms": elapsed_ms(started),
+        },
     )
 
     return {

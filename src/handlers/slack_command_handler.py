@@ -26,6 +26,10 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+from botocore.exceptions import (
+    BotoCoreError,
+    ClientError,
+)
 
 from src.ai.bedrock_client import (
     BedrockInvocationError,
@@ -38,6 +42,9 @@ from src.ai.db_health_summary import (
 from src.ai.intent_parser import (
     IntentParseError,
     parse_health_intent,
+)
+from src.ai.monthly_report_summary import (
+    summarize_monthly_report,
 )
 from src.ai.storage_forecast_summary import (
     summarize_storage_forecast,
@@ -60,16 +67,28 @@ from src.config.atlas_config import (
     TargetSettings,
     load_config,
 )
+from src.observability.logger import (
+    elapsed_ms,
+    get_logger,
+    request_id as context_request_id,
+)
 from src.query.athena_client import (
     AthenaQueryError,
     create_session as create_athena_session,
 )
+from src.query.monthly_report import (
+    default_report_month,
+)
 from src.query.top_sql import (
     resolve_pi_dbi_resource_ids,
 )
+
+logger = get_logger(__name__)
+
 _SIGNATURE_VERSION = "v0"
 _MAX_REQUEST_AGE_SECONDS = 300
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _DURATION_PATTERN = re.compile(r"^(\d+)(m|h)$")
 _STORAGE_DAYS_PATTERN = re.compile(r"^(\d+)d$")
 _DEFAULT_LOOKBACK_MINUTES = 30
@@ -147,7 +166,7 @@ def verify_slack_signature(
 def parse_command_text(
     text: str,
 ) -> tuple[str, str, str]:
-    """Parse '/atlas health|storage|topsql <target> [...]'.
+    """Parse '/atlas health|storage|topsql|report <target> [...]'.
 
     Returns (target_name, mode, value):
     - mode "date": value is a YYYY-MM-DD date -- historical, reads the
@@ -161,6 +180,9 @@ def parse_command_text(
     - mode "topsql": value is a lookback window in minutes (as a string) --
       reads live CloudWatch health plus Performance Insights' Top SQL
       ranking for the same window (src.ai.top_sql_summary).
+    - mode "report": value is a YYYY-MM month -- aggregates that whole
+      month from the Curated/Athena layer and compares it against the
+      month before (src.ai.monthly_report_summary).
     """
 
     parts = (text or "").strip().split()
@@ -169,14 +191,39 @@ def parse_command_text(
         "health",
         "storage",
         "topsql",
+        "report",
     ):
         raise SlackCommandError(
             "사용법: /atlas health <target> [YYYY-MM-DD | 30m | 2h], "
             "/atlas storage <target> [30d], "
-            "또는 /atlas topsql <target> [10m]"
+            "/atlas topsql <target> [10m], "
+            "또는 /atlas report <target> [2026-07]"
         )
 
     command, target_name = parts[0], parts[1]
+
+    if command == "report":
+        if len(parts) <= 2:
+            # A report defaults to the last complete month: the current
+            # month is still accumulating, so comparing it against a
+            # full previous month would understate every figure.
+            return (
+                target_name,
+                "report",
+                default_report_month(),
+            )
+
+        if not _MONTH_PATTERN.match(parts[2]):
+            raise SlackCommandError(
+                "리포트 월은 'YYYY-MM' 형식으로 "
+                "입력해주세요 (예: 2026-07)."
+            )
+
+        return (
+            target_name,
+            "report",
+            parts[2],
+        )
 
     if command == "storage":
         if len(parts) <= 2:
@@ -358,12 +405,12 @@ def resolve_query_scope(
     account raises SlackCommandError asking for a more specific name,
     since a single query is scoped to one account/region.
 
-    For mode "storage", the resolved instance identifiers are also
-    extended with each matched instance's own cluster_identifier (see
-    _extend_with_cluster_identifiers) -- Aurora's storage capacity
-    metric (VolumeBytesUsed) is published once per cluster, not per
-    instance, so a storage-forecast query needs the cluster's own
-    identifier in scope to find it.
+    For modes "storage" and "report", the resolved instance identifiers
+    are also extended with each matched instance's own
+    cluster_identifier (see _extend_with_cluster_identifiers) --
+    Aurora's storage capacity metric (VolumeBytesUsed) is published
+    once per cluster, not per instance, so a query that reports on
+    storage needs the cluster's own identifier in scope to find it.
     """
 
     target = _find_config_target(config, name)
@@ -423,7 +470,7 @@ def resolve_query_scope(
         except ResourceResolutionError:
             continue
 
-        if mode == "storage":
+        if mode in ("storage", "report"):
             candidate_resource_ids = (
                 _extend_with_cluster_identifiers(
                     candidate_resource_ids,
@@ -574,7 +621,11 @@ def handle_slash_command(
         ),
     )
 
-    if headers.get("x-slack-retry-num"):
+    retry_num = headers.get(
+        "x-slack-retry-num"
+    )
+
+    if retry_num:
         # Slack retried because it didn't see our ack within its
         # 3-second window (cold start + cross-Pacific network latency
         # can exceed that even when our own Lambda duration is fine).
@@ -582,6 +633,19 @@ def handle_slash_command(
         # about to -- so ack this retry without dispatching a
         # duplicate one, which would double the Bedrock/Athena cost
         # and could post two answers to the same thread.
+        logger.info(
+            "slack_retry_suppressed",
+            extra={
+                "request_id": (
+                    context_request_id(context)
+                ),
+                "retry_num": retry_num,
+                "retry_reason": headers.get(
+                    "x-slack-retry-reason"
+                ),
+            },
+        )
+
         return _json_response(
             200,
             {
@@ -606,8 +670,9 @@ def handle_slash_command(
                     "(예: /atlas watchcon-a 최근 30분 "
                     "상태 확인해줘, /atlas health "
                     "watchcon-a 2026-08-19, /atlas "
-                    "storage watchcon-a 30d, 또는 "
-                    "/atlas topsql watchcon-a 10m)"
+                    "storage watchcon-a 30d, /atlas "
+                    "topsql watchcon-a 10m, 또는 "
+                    "/atlas report watchcon-a 2026-07)"
                 ),
             },
         )
@@ -627,6 +692,23 @@ def handle_slash_command(
                 "response_url": response_url,
             }
         ).encode("utf-8"),
+    )
+
+    logger.info(
+        "slack_command_dispatched",
+        extra={
+            "request_id": (
+                context_request_id(context)
+            ),
+            "command_text": command_text,
+            "job_function": job_function_name,
+            "slack_user_id": form.get(
+                "user_id", [""]
+            )[0],
+            "slack_channel_id": form.get(
+                "channel_id", [""]
+            )[0],
+        },
     )
 
     return _json_response(
@@ -695,6 +777,33 @@ def _post_to_response_url(
         response.read()
 
 
+def _failure_message(
+    error: Exception,
+    job_request_id: str | None,
+) -> str:
+    """Build the Slack reply for a failure the user cannot act on.
+
+    Deliberately does not include the raw exception text: an AWS error
+    can carry role ARNs and account IDs, and none of it tells the user
+    what to do differently. They get the exception type (enough to
+    distinguish "it's throttled, retry" from "it's broken") plus the
+    request ID that ties the message to the logged traceback.
+    """
+
+    lines = [
+        "조회 중 오류가 발생했습니다. "
+        "잠시 후 다시 시도해주세요.",
+        f"오류 유형: {type(error).__name__}",
+    ]
+
+    if job_request_id:
+        lines.append(
+            f"요청 ID: {job_request_id}"
+        )
+
+    return "\n".join(lines)
+
+
 def handle_query_job(
     event: dict[str, Any],
     context: Any,
@@ -705,47 +814,75 @@ def handle_query_job(
     first; if that does not match, falls back to Bedrock-based natural
     -language parsing (src.ai.intent_parser) so free-form questions like
     "watchcon-a 최근 30분 상태 확인해줘" work too.
+
+    A human is waiting in Slack for the whole duration of this function,
+    so it must always reach _post_to_response_url: an uncaught exception
+    here leaves the user staring at "질문을 확인하고 있습니다..." forever
+    with no indication that anything went wrong. Every failure is
+    therefore caught, logged with its traceback, and turned into a reply.
     """
 
-    command_text = event["command_text"]
-    response_url = event["response_url"]
+    started = time.perf_counter()
+    job_request_id = context_request_id(context)
 
-    bucket_name = _required_env(
-        "ATLAS_BUCKET"
+    command_text = event.get(
+        "command_text", ""
     )
-    storage_region = _required_env(
-        "ATLAS_STORAGE_REGION"
-    )
-    athena_output_location = _required_env(
-        "ATLAS_ATHENA_OUTPUT_LOCATION"
+    response_url = event.get(
+        "response_url", ""
     )
 
-    athena_database = os.getenv(
-        "ATLAS_ATHENA_DATABASE",
-        "project_atlas",
-    ).strip()
-    athena_table = os.getenv(
-        "ATLAS_ATHENA_TABLE",
-        "cloudwatch_metrics",
-    ).strip()
-    athena_workgroup = os.getenv(
-        "ATLAS_ATHENA_WORKGROUP",
-        "primary",
-    ).strip()
-    bedrock_region = os.getenv(
-        "ATLAS_BEDROCK_REGION",
-        storage_region,
-    ).strip()
-    model_id = os.getenv(
-        "ATLAS_BEDROCK_MODEL_ID",
-        "apac.anthropic.claude-3-5-sonnet-20241022-v2:0",
-    ).strip()
-    config_key = os.getenv(
-        "ATLAS_CONFIG_KEY",
-        "config/atlas.toml",
-    ).strip()
+    # Recorded in the failure logs below even when parsing never gets
+    # far enough to assign them.
+    target_name: str | None = None
+    mode: str | None = None
+
+    logger.info(
+        "query_job_started",
+        extra={
+            "request_id": job_request_id,
+            "command_text": command_text,
+        },
+    )
 
     try:
+        bucket_name = _required_env(
+            "ATLAS_BUCKET"
+        )
+        storage_region = _required_env(
+            "ATLAS_STORAGE_REGION"
+        )
+        athena_output_location = (
+            _required_env(
+                "ATLAS_ATHENA_OUTPUT_LOCATION"
+            )
+        )
+
+        athena_database = os.getenv(
+            "ATLAS_ATHENA_DATABASE",
+            "project_atlas",
+        ).strip()
+        athena_table = os.getenv(
+            "ATLAS_ATHENA_TABLE",
+            "cloudwatch_metrics",
+        ).strip()
+        athena_workgroup = os.getenv(
+            "ATLAS_ATHENA_WORKGROUP",
+            "primary",
+        ).strip()
+        bedrock_region = os.getenv(
+            "ATLAS_BEDROCK_REGION",
+            storage_region,
+        ).strip()
+        model_id = os.getenv(
+            "ATLAS_BEDROCK_MODEL_ID",
+            "apac.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        ).strip()
+        config_key = os.getenv(
+            "ATLAS_CONFIG_KEY",
+            "config/atlas.toml",
+        ).strip()
+
         bedrock_session = create_bedrock_session(
             profile_name=None,
             region_name=bedrock_region,
@@ -757,6 +894,7 @@ def handle_query_job(
                     command_text
                 )
             )
+            parser = "grammar"
         except SlackCommandError:
             target_name, mode, value = (
                 parse_health_intent(
@@ -767,6 +905,18 @@ def handle_query_job(
                     model_id=model_id,
                 )
             )
+            parser = "bedrock"
+
+        logger.info(
+            "query_intent_parsed",
+            extra={
+                "request_id": job_request_id,
+                "parser": parser,
+                "target_name": target_name,
+                "mode": mode,
+                "value": value,
+            },
+        )
 
         config = _download_config(
             bucket_name=bucket_name,
@@ -781,6 +931,26 @@ def handle_query_job(
             resolve_query_scope(
                 config, target_name, mode
             )
+        )
+
+        logger.info(
+            "query_scope_resolved",
+            extra={
+                "request_id": job_request_id,
+                "target_name": target_name,
+                "mode": mode,
+                "target_account_id": (
+                    target.account_id
+                ),
+                "target_region": (
+                    target.regions[0]
+                ),
+                "resource_count": (
+                    len(resource_ids)
+                    if resource_ids
+                    else 0
+                ),
+            },
         )
 
         athena_session = create_athena_session(
@@ -911,6 +1081,34 @@ def handle_query_job(
             label = f"최근 {lookback_minutes}분"
             title = "Top SQL 분석"
 
+        elif mode == "report":
+            report_month = value
+
+            rows, summary = (
+                summarize_monthly_report(
+                    athena_session=(
+                        athena_session
+                    ),
+                    bedrock_session=(
+                        bedrock_session
+                    ),
+                    output_location=(
+                        athena_output_location
+                    ),
+                    account_id=target.account_id,
+                    region=target.regions[0],
+                    month=report_month,
+                    resource_ids=resource_ids,
+                    model_id=model_id,
+                    database=athena_database,
+                    table=athena_table,
+                    workgroup=athena_workgroup,
+                )
+            )
+
+            label = f"{report_month}"
+            title = "월간 운영 리포트"
+
         else:
             date = value
 
@@ -941,19 +1139,131 @@ def handle_query_job(
             title=title,
         )
 
+        logger.info(
+            "query_job_succeeded",
+            extra={
+                "request_id": job_request_id,
+                "target_name": target_name,
+                "mode": mode,
+                "row_count": len(rows),
+                "duration_ms": elapsed_ms(
+                    started
+                ),
+            },
+        )
+
     except (
         SlackCommandError,
         IntentParseError,
         ResourceResolutionError,
-        AthenaQueryError,
-        BedrockInvocationError,
-        ValueError,
     ) as error:
+        # The request itself could not be understood or matched to a
+        # resource. The user can fix this by rephrasing, so the message
+        # is shown as-is and logged at warning -- this is normal use,
+        # not a system fault.
+        logger.warning(
+            "query_job_rejected",
+            extra={
+                "request_id": job_request_id,
+                "command_text": command_text,
+                "target_name": target_name,
+                "mode": mode,
+                "error_type": type(
+                    error
+                ).__name__,
+                "error_message": str(error),
+                "duration_ms": elapsed_ms(
+                    started
+                ),
+            },
+        )
+
         text = f"조회 실패: {error}"
 
-    _post_to_response_url(
-        response_url=response_url,
-        text=text,
-    )
+    except (
+        AthenaQueryError,
+        BedrockInvocationError,
+        ClientError,
+        BotoCoreError,
+        ValueError,
+    ) as error:
+        # An AWS call or an internal invariant failed -- a missing IAM
+        # permission, Bedrock throttling, an Athena error, a bad
+        # environment variable. The raw message is not actionable for
+        # the user and can carry account/ARN detail, so they get the
+        # request ID instead and the full traceback goes to the log.
+        logger.error(
+            "query_job_failed",
+            exc_info=True,
+            extra={
+                "request_id": job_request_id,
+                "command_text": command_text,
+                "target_name": target_name,
+                "mode": mode,
+                "duration_ms": elapsed_ms(
+                    started
+                ),
+            },
+        )
+
+        text = _failure_message(
+            error=error,
+            job_request_id=job_request_id,
+        )
+
+    except Exception as error:  # noqa: BLE001
+        # Last resort. Anything reaching here is a bug rather than an
+        # expected failure mode, but the user must still get a reply --
+        # silence is the one outcome this handler must never produce.
+        logger.exception(
+            "query_job_crashed",
+            extra={
+                "request_id": job_request_id,
+                "command_text": command_text,
+                "target_name": target_name,
+                "mode": mode,
+                "duration_ms": elapsed_ms(
+                    started
+                ),
+            },
+        )
+
+        text = _failure_message(
+            error=error,
+            job_request_id=job_request_id,
+        )
+
+    if not response_url:
+        logger.error(
+            "query_job_no_response_url",
+            extra={
+                "request_id": job_request_id,
+                "command_text": command_text,
+            },
+        )
+
+        return {"status": "undeliverable"}
+
+    try:
+        _post_to_response_url(
+            response_url=response_url,
+            text=text,
+        )
+    except Exception:  # noqa: BLE001
+        # The answer was produced but could not be delivered (expired
+        # response_url, Slack outage, network error). Nothing more can
+        # be done for the user on this request, so record it rather
+        # than failing the invocation and triggering a Lambda retry
+        # that would repeat the whole query.
+        logger.exception(
+            "slack_delivery_failed",
+            extra={
+                "request_id": job_request_id,
+                "target_name": target_name,
+                "mode": mode,
+            },
+        )
+
+        return {"status": "delivery_failed"}
 
     return {"status": "sent"}
