@@ -71,6 +71,28 @@ def select_available_instances(
     return resources
 
 
+def select_available_clusters(
+    inventory: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Return available DB clusters that can be monitored."""
+
+    resources: list[dict[str, Any]] = []
+
+    for cluster in inventory["clusters"]:
+        identifier = cluster.get("identifier")
+        status = cluster.get("status")
+
+        if not identifier:
+            continue
+
+        if status != "available":
+            continue
+
+        resources.append(cluster)
+
+    return resources
+
+
 def run_discovery_metrics_pipeline(
     source_profile_name: str | None,
     storage_profile_name: str | None,

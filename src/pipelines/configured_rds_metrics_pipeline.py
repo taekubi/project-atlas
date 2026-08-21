@@ -26,6 +26,7 @@ from src.collectors.rds_inventory import (
     collect_rds_inventory,
 )
 from src.collectors.metric_profiles import (
+    resolve_cluster_metric_profile,
     resolve_metric_profile,
 )
 from src.config.atlas_config import (
@@ -34,6 +35,7 @@ from src.config.atlas_config import (
     load_config,
 )
 from src.pipelines.rds_discovery_metrics_pipeline import (
+    select_available_clusters,
     select_available_instances,
 )
 from src.storage.s3_uploader import (
@@ -308,6 +310,177 @@ def collect_target_region(
                     ),
                 }
             )
+
+    cluster_metric_profile = (
+        config.collection.metric_profile
+        if config.collection.uses_metric_profile
+        else None
+    )
+
+    if cluster_metric_profile is not None:
+        for cluster in select_available_clusters(
+            inventory=inventory
+        ):
+            cluster_identifier = cluster[
+                "identifier"
+            ]
+
+            cluster_profile_selection = (
+                resolve_cluster_metric_profile(
+                    cluster=cluster,
+                    profile_name=(
+                        cluster_metric_profile
+                    ),
+                )
+            )
+
+            cluster_metric_names = list(
+                cluster_profile_selection.metrics
+            )
+
+            if not cluster_metric_names:
+                # e.g. a non-Aurora cluster -- nothing is published
+                # under the DBClusterIdentifier dimension for it.
+                continue
+
+            resource_summaries.append(
+                {
+                    "resource_id": (
+                        cluster_identifier
+                    ),
+                    "engine": cluster.get(
+                        "engine"
+                    ),
+                    "cluster_role": "cluster",
+                    "metric_profile": (
+                        cluster_profile_selection.profile_name
+                    ),
+                    "resource_profile": (
+                        cluster_profile_selection.resource_profile
+                    ),
+                    "metric_count": len(
+                        cluster_metric_names
+                    ),
+                    "metrics": (
+                        cluster_metric_names
+                    ),
+                }
+            )
+
+            payloads = collect_metrics(
+                session=source_session,
+                region_name=source_region,
+                resource_dimension="DBClusterIdentifier",
+                resource_id=cluster_identifier,
+                metric_names=(
+                    cluster_metric_names
+                ),
+                lookback_minutes=(
+                    config.collection.lookback_minutes
+                ),
+                period_seconds=(
+                    config.collection.period_seconds
+                ),
+            )
+
+            for payload in payloads:
+                payload["source_account_id"] = (
+                    actual_account_id
+                )
+
+                payload["target_name"] = (
+                    target.name
+                )
+
+                payload["engine"] = cluster.get(
+                    "engine"
+                )
+
+                payload["cluster_identifier"] = (
+                    cluster_identifier
+                )
+
+                payload["cluster_role"] = "cluster"
+
+                payload["metric_profile"] = (
+                    cluster_profile_selection.profile_name
+                )
+
+                payload["resource_profile"] = (
+                    cluster_profile_selection.resource_profile
+                )
+
+                local_path = save_json(
+                    payload=payload,
+                    output_root=(
+                        account_source_root
+                    ),
+                )
+
+                object_key = build_object_key(
+                    file_path=local_path,
+                    source_root=source_root,
+                    prefix=(
+                        config.atlas.s3_prefix
+                    ),
+                )
+
+                metadata = upload_file(
+                    profile_name=(
+                        storage_profile_name
+                    ),
+                    region_name=(
+                        config.atlas.storage_region
+                    ),
+                    bucket_name=(
+                        config.atlas.bucket
+                    ),
+                    file_path=local_path,
+                    object_key=object_key,
+                )
+
+                results.append(
+                    {
+                        "target_name": (
+                            target.name
+                        ),
+                        "source_account_id": (
+                            actual_account_id
+                        ),
+                        "source_region": (
+                            source_region
+                        ),
+                        "storage_region": (
+                            config.atlas.storage_region
+                        ),
+                        "resource_id": (
+                            cluster_identifier
+                        ),
+                        "engine": cluster.get(
+                            "engine"
+                        ),
+                        "cluster_role": "cluster",
+                        "metric_profile": (
+                            cluster_profile_selection.profile_name
+                        ),
+                        "resource_profile": (
+                            cluster_profile_selection.resource_profile
+                        ),
+                        "metric_name": payload[
+                            "metric_name"
+                        ],
+                        "datapoint_count": payload[
+                            "datapoint_count"
+                        ],
+                        "s3_uri": (
+                            f"s3://{config.atlas.bucket}/"
+                            f"{object_key}"
+                        ),
+                        "encryption": metadata.get(
+                            "ServerSideEncryption"
+                        ),
+                    }
+                )
 
     return {
         "target_name": target.name,

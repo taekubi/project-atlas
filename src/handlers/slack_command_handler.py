@@ -39,6 +39,9 @@ from src.ai.intent_parser import (
     IntentParseError,
     parse_health_intent,
 )
+from src.ai.storage_forecast_summary import (
+    summarize_storage_forecast,
+)
 from src.auth.aws_session import (
     create_target_session,
 )
@@ -62,7 +65,9 @@ _SIGNATURE_VERSION = "v0"
 _MAX_REQUEST_AGE_SECONDS = 300
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DURATION_PATTERN = re.compile(r"^(\d+)(m|h)$")
+_STORAGE_DAYS_PATTERN = re.compile(r"^(\d+)d$")
 _DEFAULT_LOOKBACK_MINUTES = 30
+_DEFAULT_STORAGE_LOOKBACK_DAYS = 30
 
 
 class SlackSignatureError(Exception):
@@ -135,7 +140,7 @@ def verify_slack_signature(
 def parse_command_text(
     text: str,
 ) -> tuple[str, str, str]:
-    """Parse '/atlas health <target> [YYYY-MM-DD | Nm | Nh]'.
+    """Parse '/atlas health <target> [...]' or '/atlas storage <target> [Nd]'.
 
     Returns (target_name, mode, value):
     - mode "date": value is a YYYY-MM-DD date -- historical, reads the
@@ -143,16 +148,46 @@ def parse_command_text(
     - mode "live": value is a lookback window in minutes (as a string) --
       reads CloudWatch directly. This is the default when no third
       argument is given, since fast monitoring is the primary use case.
+    - mode "storage": value is a lookback window in days (as a string) --
+      reads the Curated/Athena layer's daily FreeStorageSpace history
+      and projects a storage-exhaustion trend (src.query.storage_forecast).
     """
 
     parts = (text or "").strip().split()
 
-    if len(parts) < 2 or parts[0] != "health":
+    if len(parts) < 2 or parts[0] not in (
+        "health",
+        "storage",
+    ):
         raise SlackCommandError(
-            "사용법: /atlas health <target> [YYYY-MM-DD | 30m | 2h]"
+            "사용법: /atlas health <target> [YYYY-MM-DD | 30m | 2h] "
+            "또는 /atlas storage <target> [30d]"
         )
 
-    target_name = parts[1]
+    command, target_name = parts[0], parts[1]
+
+    if command == "storage":
+        if len(parts) <= 2:
+            return (
+                target_name,
+                "storage",
+                str(_DEFAULT_STORAGE_LOOKBACK_DAYS),
+            )
+
+        days_match = _STORAGE_DAYS_PATTERN.match(
+            parts[2]
+        )
+
+        if not days_match:
+            raise SlackCommandError(
+                "조회 기간은 'Nd' 형식으로 입력해주세요 (예: 30d)."
+            )
+
+        return (
+            target_name,
+            "storage",
+            days_match.group(1),
+        )
 
     if len(parts) <= 2:
         return (
@@ -215,6 +250,46 @@ def _build_target_session(
     )
 
 
+def _extend_with_cluster_identifiers(
+    resource_ids: list[str],
+    inventory: dict[str, list[dict[str, Any]]],
+) -> list[str]:
+    """Add each resolved instance's own cluster_identifier to the set.
+
+    Aurora publishes storage capacity (VolumeBytesUsed) once per
+    cluster under the DBClusterIdentifier dimension, not per member
+    instance -- so a storage-forecast query filtered to member
+    instance identifiers alone would miss it. Adding the cluster's own
+    identifier is harmless for non-Aurora resources, since no data
+    ever exists under an identifier CloudWatch was never asked about.
+    """
+
+    instances_by_id = {
+        instance.get("identifier"): instance
+        for instance in inventory.get(
+            "instances", []
+        )
+    }
+
+    extended = set(resource_ids)
+
+    for resource_id in resource_ids:
+        instance = instances_by_id.get(
+            resource_id
+        )
+
+        cluster_identifier = (
+            instance.get("cluster_identifier")
+            if instance
+            else None
+        )
+
+        if cluster_identifier:
+            extended.add(cluster_identifier)
+
+    return sorted(extended)
+
+
 def resolve_query_scope(
     config: AtlasConfig,
     name: str,
@@ -237,6 +312,13 @@ def resolve_query_scope(
     Every enabled target account is searched; a match in more than one
     account raises SlackCommandError asking for a more specific name,
     since a single query is scoped to one account/region.
+
+    For mode "storage", the resolved instance identifiers are also
+    extended with each matched instance's own cluster_identifier (see
+    _extend_with_cluster_identifiers) -- Aurora's storage capacity
+    metric (VolumeBytesUsed) is published once per cluster, not per
+    instance, so a storage-forecast query needs the cluster's own
+    identifier in scope to find it.
     """
 
     target = _find_config_target(config, name)
@@ -296,6 +378,14 @@ def resolve_query_scope(
         except ResourceResolutionError:
             continue
 
+        if mode == "storage":
+            candidate_resource_ids = (
+                _extend_with_cluster_identifiers(
+                    candidate_resource_ids,
+                    inventory,
+                )
+            )
+
         if matched_target is not None:
             raise SlackCommandError(
                 f"'{name}'과(와) 일치하는 "
@@ -325,11 +415,14 @@ def format_slack_message(
     label: str,
     rows: list[dict[str, str | None]],
     summary: str,
+    title: str = "DB Health",
 ) -> str:
-    """Render a DB Health Summary as a Slack mrkdwn message.
+    """Render a query summary as a Slack mrkdwn message.
 
     `label` describes the query window shown next to the target name --
-    a date (historical) or a phrase like "최근 30분" (live).
+    a date (historical), a phrase like "최근 30분" (live), or "최근 30일
+    추세" (storage forecast). `title` names the kind of result (e.g.
+    "DB Health" or "스토리지 용량 예측").
     """
 
     if not rows:
@@ -339,7 +432,7 @@ def format_slack_message(
 
     return "\n".join(
         [
-            f"*{target_name} DB Health* ({label})",
+            f"*{target_name} {title}* ({label})",
             "",
             summary,
         ]
@@ -466,8 +559,9 @@ def handle_slash_command(
                 "text": (
                     "사용법: /atlas <DB 이름> [질문] "
                     "(예: /atlas watchcon-a 최근 30분 "
-                    "상태 확인해줘, 또는 /atlas health "
-                    "watchcon-a 2026-08-19)"
+                    "상태 확인해줘, /atlas health "
+                    "watchcon-a 2026-08-19, 또는 "
+                    "/atlas storage watchcon-a 30d)"
                 ),
             },
         )
@@ -683,6 +777,35 @@ def handle_query_job(
             )
 
             label = f"최근 {lookback_minutes}분"
+            title = "DB Health"
+
+        elif mode == "storage":
+            lookback_days = int(value)
+
+            rows, summary = (
+                summarize_storage_forecast(
+                    athena_session=(
+                        athena_session
+                    ),
+                    bedrock_session=(
+                        bedrock_session
+                    ),
+                    output_location=(
+                        athena_output_location
+                    ),
+                    account_id=target.account_id,
+                    region=target.regions[0],
+                    resource_ids=resource_ids,
+                    lookback_days=lookback_days,
+                    model_id=model_id,
+                    database=athena_database,
+                    table=athena_table,
+                    workgroup=athena_workgroup,
+                )
+            )
+
+            label = f"최근 {lookback_days}일 추세"
+            title = "스토리지 용량 예측"
 
         else:
             date = value
@@ -704,12 +827,14 @@ def handle_query_job(
             )
 
             label = date
+            title = "DB Health"
 
         text = format_slack_message(
             target_name=target_name,
             label=label,
             rows=rows,
             summary=summary,
+            title=title,
         )
 
     except (

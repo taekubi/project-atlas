@@ -10,6 +10,7 @@ import pytest
 from src.handlers.slack_command_handler import (
     SlackCommandError,
     SlackSignatureError,
+    _extend_with_cluster_identifiers,
     _find_config_target,
     format_slack_message,
     parse_command_text,
@@ -110,6 +111,25 @@ def test_parse_command_text_rejects_missing_health_prefix():
         parse_command_text("watchcon-a 최근 30분")
 
 
+def test_parse_command_text_defaults_storage_to_30_days():
+    assert parse_command_text("storage watchcon-a") == (
+        "watchcon-a",
+        "storage",
+        "30",
+    )
+
+
+def test_parse_command_text_parses_storage_days():
+    assert parse_command_text(
+        "storage watchcon-a 60d"
+    ) == ("watchcon-a", "storage", "60")
+
+
+def test_parse_command_text_rejects_bad_storage_argument():
+    with pytest.raises(SlackCommandError):
+        parse_command_text("storage watchcon-a 60m")
+
+
 def test_format_slack_message_reports_no_rows():
     text = format_slack_message(
         target_name="watchcon-a",
@@ -130,6 +150,66 @@ def test_format_slack_message_includes_target_label_and_summary():
     assert "watchcon-a" in text
     assert "최근 30분" in text
     assert "정상 상태입니다." in text
+    assert "DB Health" in text
+
+
+def test_format_slack_message_uses_custom_title():
+    text = format_slack_message(
+        target_name="watchcon-a",
+        label="최근 30일 추세",
+        rows=[{"resource_id": "watchcon-a"}],
+        summary="여유 있습니다.",
+        title="스토리지 용량 예측",
+    )
+    assert "스토리지 용량 예측" in text
+
+
+def test_extend_with_cluster_identifiers_adds_aurora_cluster():
+    inventory = {
+        "instances": [
+            {
+                "identifier": "watchcon-a",
+                "cluster_identifier": (
+                    "watchcon-cluster-cluster"
+                ),
+            },
+            {
+                "identifier": "watchcon-c",
+                "cluster_identifier": (
+                    "watchcon-cluster-cluster"
+                ),
+            },
+        ],
+    }
+
+    extended = _extend_with_cluster_identifiers(
+        ["watchcon-a", "watchcon-c"],
+        inventory,
+    )
+
+    assert extended == [
+        "watchcon-a",
+        "watchcon-c",
+        "watchcon-cluster-cluster",
+    ]
+
+
+def test_extend_with_cluster_identifiers_leaves_standalone_instance_unchanged():
+    inventory = {
+        "instances": [
+            {
+                "identifier": "rds-devops",
+                "cluster_identifier": None,
+            },
+        ],
+    }
+
+    extended = _extend_with_cluster_identifiers(
+        ["rds-devops"],
+        inventory,
+    )
+
+    assert extended == ["rds-devops"]
 
 
 def _make_config(targets):
