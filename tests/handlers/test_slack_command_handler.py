@@ -373,3 +373,92 @@ def test_resolve_query_scope_discovers_resources_for_unmatched_name():
 
     assert resolved_target is target
     assert sorted(resource_ids) == ["watchcon-a", "watchcon-c"]
+
+
+def test_parse_command_text_parses_report_month():
+    assert parse_command_text(
+        "report watchcon-a 2026-07"
+    ) == ("watchcon-a", "report", "2026-07")
+
+
+def test_parse_command_text_defaults_report_to_last_complete_month():
+    # No month given: the last finished month, never the partial
+    # current one (comparing a partial month against a full one would
+    # make every figure look like a drop).
+    from src.query.monthly_report import (
+        default_report_month,
+    )
+
+    target, mode, value = parse_command_text(
+        "report watchcon-a"
+    )
+
+    assert (target, mode) == (
+        "watchcon-a",
+        "report",
+    )
+    assert value == default_report_month()
+
+
+def test_parse_command_text_rejects_a_full_date_for_report():
+    with pytest.raises(SlackCommandError):
+        parse_command_text(
+            "report watchcon-a 2026-07-15"
+        )
+
+
+def test_parse_command_text_rejects_an_impossible_report_month():
+    with pytest.raises(SlackCommandError):
+        parse_command_text(
+            "report watchcon-a 2026-13"
+        )
+
+
+def test_resolve_query_scope_extends_report_scope_to_clusters():
+    # Aurora publishes VolumeBytesUsed per cluster, so a report scoped
+    # only to member instances would miss the cluster's storage.
+    target = TargetSettings(
+        name="headquarters",
+        account_id="826846563965",
+        role_name="r",
+        regions=["ap-northeast-2"],
+        enabled=True,
+    )
+    config = _make_config([target])
+
+    inventory = {
+        "clusters": [
+            {
+                "identifier": "watchcon-cluster",
+                "members": [
+                    {"identifier": "watchcon-a"}
+                ],
+            }
+        ],
+        "instances": [
+            {
+                "identifier": "watchcon-a",
+                "cluster_identifier": (
+                    "watchcon-cluster"
+                ),
+            }
+        ],
+    }
+
+    with patch(
+        "src.handlers.slack_command_handler."
+        "_build_target_session",
+        return_value=MagicMock(),
+    ), patch(
+        "src.handlers.slack_command_handler."
+        "collect_rds_inventory",
+        return_value=inventory,
+    ):
+        _, resource_ids = resolve_query_scope(
+            config, "watchcon-a", "report"
+        )
+
+    assert sorted(resource_ids) == [
+        "watchcon-a",
+        "watchcon-cluster",
+    ]

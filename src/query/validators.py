@@ -14,6 +14,7 @@ import re
 ACCOUNT_ID_PATTERN = re.compile(r"^\d{12}$")
 REGION_PATTERN = re.compile(r"^[a-z]{2}-[a-z]+-\d$")
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 RESOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 DBI_RESOURCE_ID_PATTERN = re.compile(r"^db-[A-Z0-9]+$")
 
@@ -66,6 +67,23 @@ def validate_date(
         date,
         DATE_PATTERN,
         "date",
+    )
+
+
+def validate_month(
+    month: str,
+) -> str:
+    """Validate a YYYY-MM month string.
+
+    Stricter than slicing a date pattern: the month component is range
+    checked, so '2026-13' is rejected rather than producing a query
+    that silently matches nothing.
+    """
+
+    return validate(
+        month,
+        MONTH_PATTERN,
+        "month",
     )
 
 

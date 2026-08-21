@@ -16,6 +16,12 @@ from __future__ import annotations
 import boto3
 
 from src.ai.bedrock_client import invoke_tool
+from src.query.monthly_report import (
+    default_report_month,
+)
+from src.query.validators import (
+    MONTH_PATTERN,
+)
 
 _DEFAULT_MODEL_ID = (
     "apac.anthropic.claude-3-5-sonnet-20241022-v2:0"
@@ -56,6 +62,7 @@ _TOOL_SPEC = {
                             "date",
                             "storage",
                             "topsql",
+                            "report",
                         ],
                         "description": (
                             "'live' for a recent/current-status question "
@@ -70,7 +77,13 @@ _TOOL_SPEC = {
                             "a question about which SQL/query is "
                             "causing load right now (e.g. 가장 많은 "
                             "이벤트를 발생시키는 SQL이 뭐야, top sql, "
-                            "부하 원인이 뭐야, 뭐가 느려)."
+                            "부하 원인이 뭐야, 뭐가 느려). 'report' "
+                            "for a request covering a whole calendar "
+                            "month or asking what changed over a month "
+                            "(e.g. 지난달 리포트, 7월 운영 보고서, "
+                            "이번 달 어땠어, 지난달이랑 비교해줘) -- "
+                            "prefer 'report' over 'date' whenever a "
+                            "month rather than a single day is meant."
                         ),
                     },
                     "lookback_minutes": {
@@ -97,6 +110,17 @@ _TOOL_SPEC = {
                             "of history to fit the storage trend on. "
                             "Default to 30 if the request does not "
                             "specify a window."
+                        ),
+                    },
+                    "month": {
+                        "type": "string",
+                        "description": (
+                            "Only when mode is 'report': the month as "
+                            "YYYY-MM. Resolve relative wording against "
+                            "today's date (지난달 -> the previous "
+                            "month, 이번 달 -> the current month). "
+                            "Omit if the request names no month, and "
+                            "the last complete month is used."
                         ),
                     },
                 },
@@ -210,6 +234,24 @@ def parse_health_intent(
             target_name,
             "topsql",
             str(lookback_minutes),
+        )
+
+    if tool_input.get("mode") == "report":
+        month = str(
+            tool_input.get("month") or ""
+        ).strip()
+
+        # An unparseable or absent month falls back to the last
+        # complete month rather than failing: "리포트 보여줘" with no
+        # month named is a reasonable request, and that is the month it
+        # almost always means.
+        if not MONTH_PATTERN.match(month):
+            month = default_report_month()
+
+        return (
+            target_name,
+            "report",
+            month,
         )
 
     lookback_minutes = tool_input.get(

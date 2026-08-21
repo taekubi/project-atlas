@@ -43,6 +43,9 @@ from src.ai.intent_parser import (
     IntentParseError,
     parse_health_intent,
 )
+from src.ai.monthly_report_summary import (
+    summarize_monthly_report,
+)
 from src.ai.storage_forecast_summary import (
     summarize_storage_forecast,
 )
@@ -73,6 +76,9 @@ from src.query.athena_client import (
     AthenaQueryError,
     create_session as create_athena_session,
 )
+from src.query.monthly_report import (
+    default_report_month,
+)
 from src.query.top_sql import (
     resolve_pi_dbi_resource_ids,
 )
@@ -82,6 +88,7 @@ logger = get_logger(__name__)
 _SIGNATURE_VERSION = "v0"
 _MAX_REQUEST_AGE_SECONDS = 300
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _DURATION_PATTERN = re.compile(r"^(\d+)(m|h)$")
 _STORAGE_DAYS_PATTERN = re.compile(r"^(\d+)d$")
 _DEFAULT_LOOKBACK_MINUTES = 30
@@ -159,7 +166,7 @@ def verify_slack_signature(
 def parse_command_text(
     text: str,
 ) -> tuple[str, str, str]:
-    """Parse '/atlas health|storage|topsql <target> [...]'.
+    """Parse '/atlas health|storage|topsql|report <target> [...]'.
 
     Returns (target_name, mode, value):
     - mode "date": value is a YYYY-MM-DD date -- historical, reads the
@@ -173,6 +180,9 @@ def parse_command_text(
     - mode "topsql": value is a lookback window in minutes (as a string) --
       reads live CloudWatch health plus Performance Insights' Top SQL
       ranking for the same window (src.ai.top_sql_summary).
+    - mode "report": value is a YYYY-MM month -- aggregates that whole
+      month from the Curated/Athena layer and compares it against the
+      month before (src.ai.monthly_report_summary).
     """
 
     parts = (text or "").strip().split()
@@ -181,14 +191,39 @@ def parse_command_text(
         "health",
         "storage",
         "topsql",
+        "report",
     ):
         raise SlackCommandError(
             "사용법: /atlas health <target> [YYYY-MM-DD | 30m | 2h], "
             "/atlas storage <target> [30d], "
-            "또는 /atlas topsql <target> [10m]"
+            "/atlas topsql <target> [10m], "
+            "또는 /atlas report <target> [2026-07]"
         )
 
     command, target_name = parts[0], parts[1]
+
+    if command == "report":
+        if len(parts) <= 2:
+            # A report defaults to the last complete month: the current
+            # month is still accumulating, so comparing it against a
+            # full previous month would understate every figure.
+            return (
+                target_name,
+                "report",
+                default_report_month(),
+            )
+
+        if not _MONTH_PATTERN.match(parts[2]):
+            raise SlackCommandError(
+                "리포트 월은 'YYYY-MM' 형식으로 "
+                "입력해주세요 (예: 2026-07)."
+            )
+
+        return (
+            target_name,
+            "report",
+            parts[2],
+        )
 
     if command == "storage":
         if len(parts) <= 2:
@@ -370,12 +405,12 @@ def resolve_query_scope(
     account raises SlackCommandError asking for a more specific name,
     since a single query is scoped to one account/region.
 
-    For mode "storage", the resolved instance identifiers are also
-    extended with each matched instance's own cluster_identifier (see
-    _extend_with_cluster_identifiers) -- Aurora's storage capacity
-    metric (VolumeBytesUsed) is published once per cluster, not per
-    instance, so a storage-forecast query needs the cluster's own
-    identifier in scope to find it.
+    For modes "storage" and "report", the resolved instance identifiers
+    are also extended with each matched instance's own
+    cluster_identifier (see _extend_with_cluster_identifiers) --
+    Aurora's storage capacity metric (VolumeBytesUsed) is published
+    once per cluster, not per instance, so a query that reports on
+    storage needs the cluster's own identifier in scope to find it.
     """
 
     target = _find_config_target(config, name)
@@ -435,7 +470,7 @@ def resolve_query_scope(
         except ResourceResolutionError:
             continue
 
-        if mode == "storage":
+        if mode in ("storage", "report"):
             candidate_resource_ids = (
                 _extend_with_cluster_identifiers(
                     candidate_resource_ids,
@@ -635,8 +670,9 @@ def handle_slash_command(
                     "(예: /atlas watchcon-a 최근 30분 "
                     "상태 확인해줘, /atlas health "
                     "watchcon-a 2026-08-19, /atlas "
-                    "storage watchcon-a 30d, 또는 "
-                    "/atlas topsql watchcon-a 10m)"
+                    "storage watchcon-a 30d, /atlas "
+                    "topsql watchcon-a 10m, 또는 "
+                    "/atlas report watchcon-a 2026-07)"
                 ),
             },
         )
@@ -1044,6 +1080,34 @@ def handle_query_job(
 
             label = f"최근 {lookback_minutes}분"
             title = "Top SQL 분석"
+
+        elif mode == "report":
+            report_month = value
+
+            rows, summary = (
+                summarize_monthly_report(
+                    athena_session=(
+                        athena_session
+                    ),
+                    bedrock_session=(
+                        bedrock_session
+                    ),
+                    output_location=(
+                        athena_output_location
+                    ),
+                    account_id=target.account_id,
+                    region=target.regions[0],
+                    month=report_month,
+                    resource_ids=resource_ids,
+                    model_id=model_id,
+                    database=athena_database,
+                    table=athena_table,
+                    workgroup=athena_workgroup,
+                )
+            )
+
+            label = f"{report_month}"
+            title = "월간 운영 리포트"
 
         else:
             date = value
