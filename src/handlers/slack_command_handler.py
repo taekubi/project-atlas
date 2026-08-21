@@ -42,6 +42,9 @@ from src.ai.intent_parser import (
 from src.ai.storage_forecast_summary import (
     summarize_storage_forecast,
 )
+from src.ai.top_sql_summary import (
+    summarize_top_sql,
+)
 from src.auth.aws_session import (
     create_target_session,
 )
@@ -61,6 +64,9 @@ from src.query.athena_client import (
     AthenaQueryError,
     create_session as create_athena_session,
 )
+from src.query.top_sql import (
+    resolve_pi_dbi_resource_ids,
+)
 _SIGNATURE_VERSION = "v0"
 _MAX_REQUEST_AGE_SECONDS = 300
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -68,6 +74,7 @@ _DURATION_PATTERN = re.compile(r"^(\d+)(m|h)$")
 _STORAGE_DAYS_PATTERN = re.compile(r"^(\d+)d$")
 _DEFAULT_LOOKBACK_MINUTES = 30
 _DEFAULT_STORAGE_LOOKBACK_DAYS = 30
+_DEFAULT_TOPSQL_LOOKBACK_MINUTES = 10
 
 
 class SlackSignatureError(Exception):
@@ -140,7 +147,7 @@ def verify_slack_signature(
 def parse_command_text(
     text: str,
 ) -> tuple[str, str, str]:
-    """Parse '/atlas health <target> [...]' or '/atlas storage <target> [Nd]'.
+    """Parse '/atlas health|storage|topsql <target> [...]'.
 
     Returns (target_name, mode, value):
     - mode "date": value is a YYYY-MM-DD date -- historical, reads the
@@ -151,6 +158,9 @@ def parse_command_text(
     - mode "storage": value is a lookback window in days (as a string) --
       reads the Curated/Athena layer's daily FreeStorageSpace history
       and projects a storage-exhaustion trend (src.query.storage_forecast).
+    - mode "topsql": value is a lookback window in minutes (as a string) --
+      reads live CloudWatch health plus Performance Insights' Top SQL
+      ranking for the same window (src.ai.top_sql_summary).
     """
 
     parts = (text or "").strip().split()
@@ -158,10 +168,12 @@ def parse_command_text(
     if len(parts) < 2 or parts[0] not in (
         "health",
         "storage",
+        "topsql",
     ):
         raise SlackCommandError(
-            "사용법: /atlas health <target> [YYYY-MM-DD | 30m | 2h] "
-            "또는 /atlas storage <target> [30d]"
+            "사용법: /atlas health <target> [YYYY-MM-DD | 30m | 2h], "
+            "/atlas storage <target> [30d], "
+            "또는 /atlas topsql <target> [10m]"
         )
 
     command, target_name = parts[0], parts[1]
@@ -187,6 +199,39 @@ def parse_command_text(
             target_name,
             "storage",
             days_match.group(1),
+        )
+
+    if command == "topsql":
+        if len(parts) <= 2:
+            return (
+                target_name,
+                "topsql",
+                str(
+                    _DEFAULT_TOPSQL_LOOKBACK_MINUTES
+                ),
+            )
+
+        duration_match = (
+            _DURATION_PATTERN.match(parts[2])
+        )
+
+        if not duration_match:
+            raise SlackCommandError(
+                "조회 기간은 'Nm' 또는 'Nh' 형식으로 "
+                "입력해주세요 (예: 10m)."
+            )
+
+        amount, unit = (
+            duration_match.groups()
+        )
+        minutes = int(amount) * (
+            60 if unit == "h" else 1
+        )
+
+        return (
+            target_name,
+            "topsql",
+            str(minutes),
         )
 
     if len(parts) <= 2:
@@ -300,9 +345,9 @@ def resolve_query_scope(
     If `name` matches a configured Atlas target's (account-level) name:
     - for a historical/Athena query (mode "date"), no resource filter is
       needed -- Athena can query the whole account directly
-    - for a live/CloudWatch query (mode "live"), CloudWatch has no
-      "every instance" query, so every instance in that account is
-      discovered and listed explicitly
+    - for a live/CloudWatch query (mode "live") or a Top SQL query
+      (mode "topsql"), there is no "every instance" API call, so every
+      instance in that account is discovered and listed explicitly
 
     Otherwise `name` is resolved against live RDS/Aurora discovery
     (src.collectors.resource_resolver) instead of requiring an exact
@@ -324,7 +369,7 @@ def resolve_query_scope(
     target = _find_config_target(config, name)
 
     if target is not None:
-        if mode != "live":
+        if mode not in ("live", "topsql"):
             return target, None
 
         inventory = collect_rds_inventory(
@@ -420,9 +465,9 @@ def format_slack_message(
     """Render a query summary as a Slack mrkdwn message.
 
     `label` describes the query window shown next to the target name --
-    a date (historical), a phrase like "최근 30분" (live), or "최근 30일
-    추세" (storage forecast). `title` names the kind of result (e.g.
-    "DB Health" or "스토리지 용량 예측").
+    a date (historical), a phrase like "최근 30분" (live or topsql), or
+    "최근 30일 추세" (storage forecast). `title` names the kind of
+    result (e.g. "DB Health", "스토리지 용량 예측", or "Top SQL 분석").
     """
 
     if not rows:
@@ -560,8 +605,9 @@ def handle_slash_command(
                     "사용법: /atlas <DB 이름> [질문] "
                     "(예: /atlas watchcon-a 최근 30분 "
                     "상태 확인해줘, /atlas health "
-                    "watchcon-a 2026-08-19, 또는 "
-                    "/atlas storage watchcon-a 30d)"
+                    "watchcon-a 2026-08-19, /atlas "
+                    "storage watchcon-a 30d, 또는 "
+                    "/atlas topsql watchcon-a 10m)"
                 ),
             },
         )
@@ -806,6 +852,64 @@ def handle_query_job(
 
             label = f"최근 {lookback_days}일 추세"
             title = "스토리지 용량 예측"
+
+        elif mode == "topsql":
+            lookback_minutes = int(value)
+
+            target_session = (
+                _build_target_session(target)
+            )
+
+            inventory = collect_rds_inventory(
+                session=target_session,
+            )
+
+            (
+                dbi_resource_id_by_resource_id,
+                resource_ids_without_pi,
+            ) = resolve_pi_dbi_resource_ids(
+                resource_ids=resource_ids,
+                inventory=inventory,
+            )
+
+            if not dbi_resource_id_by_resource_id:
+                raise SlackCommandError(
+                    "Performance Insights가 켜진 "
+                    "리소스가 없습니다: "
+                    + ", ".join(
+                        resource_ids_without_pi
+                    )
+                )
+
+            (
+                rows,
+                _top_sql_by_resource,
+                summary,
+            ) = summarize_top_sql(
+                target_session=target_session,
+                bedrock_session=bedrock_session,
+                resource_ids=resource_ids,
+                dbi_resource_id_by_resource_id=(
+                    dbi_resource_id_by_resource_id
+                ),
+                lookback_minutes=(
+                    lookback_minutes
+                ),
+                model_id=model_id,
+            )
+
+            if resource_ids_without_pi:
+                summary += (
+                    "\n\n(Performance Insights가 "
+                    "꺼져 있어 제외된 리소스: "
+                    + ", ".join(
+                        resource_ids_without_pi
+                    )
+                    + ")"
+                )
+
+            label = f"최근 {lookback_minutes}분"
+            title = "Top SQL 분석"
 
         else:
             date = value

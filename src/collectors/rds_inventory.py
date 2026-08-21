@@ -162,6 +162,9 @@ def collect_rds_instances(
                     ),
                     "resource_id": identifier,
                     "identifier": identifier,
+                    "dbi_resource_id": db_instance.get(
+                        "DbiResourceId"
+                    ),
                     "engine": db_instance.get("Engine"),
                     "engine_version": db_instance.get(
                         "EngineVersion"
@@ -347,6 +350,12 @@ def print_inventory(
             f"    PI enabled   : "
             f"{instance['performance_insights_enabled']}"
         )
+
+        if instance["performance_insights_enabled"]:
+            print(
+                f"    PI DbiResourceId: "
+                f"{instance['dbi_resource_id']}"
+            )
 
         print()
 

@@ -130,6 +130,31 @@ def test_parse_command_text_rejects_bad_storage_argument():
         parse_command_text("storage watchcon-a 60m")
 
 
+def test_parse_command_text_defaults_topsql_to_10_minutes():
+    assert parse_command_text("topsql watchcon-a") == (
+        "watchcon-a",
+        "topsql",
+        "10",
+    )
+
+
+def test_parse_command_text_parses_topsql_duration_minutes():
+    assert parse_command_text(
+        "topsql watchcon-a 5m"
+    ) == ("watchcon-a", "topsql", "5")
+
+
+def test_parse_command_text_converts_topsql_hours_to_minutes():
+    assert parse_command_text(
+        "topsql watchcon-a 1h"
+    ) == ("watchcon-a", "topsql", "60")
+
+
+def test_parse_command_text_rejects_bad_topsql_argument():
+    with pytest.raises(SlackCommandError):
+        parse_command_text("topsql watchcon-a 2026-08-19")
+
+
 def test_format_slack_message_reports_no_rows():
     text = format_slack_message(
         target_name="watchcon-a",
@@ -260,6 +285,44 @@ def test_resolve_query_scope_matches_config_target_in_date_mode():
 
     assert resolved_target is target
     assert resource_ids is None
+
+
+def test_resolve_query_scope_discovers_instances_for_config_target_in_topsql_mode():
+    target = TargetSettings(
+        name="headquarters",
+        account_id="826846563965",
+        role_name="r",
+        regions=["ap-northeast-2"],
+        enabled=True,
+    )
+    config = _make_config([target])
+
+    inventory = {
+        "clusters": [],
+        "instances": [
+            {"identifier": "watchcon-a"},
+            {"identifier": "watchcon-c"},
+        ],
+    }
+
+    with patch(
+        "src.handlers.slack_command_handler."
+        "_build_target_session",
+        return_value=MagicMock(),
+    ), patch(
+        "src.handlers.slack_command_handler."
+        "collect_rds_inventory",
+        return_value=inventory,
+    ):
+        resolved_target, resource_ids = resolve_query_scope(
+            config, "headquarters", "topsql"
+        )
+
+    assert resolved_target is target
+    assert sorted(resource_ids) == [
+        "watchcon-a",
+        "watchcon-c",
+    ]
 
 
 def test_resolve_query_scope_raises_when_no_targets_enabled():

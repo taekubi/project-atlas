@@ -18,6 +18,14 @@
         "rds:DescribeDBInstances"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "ReadPerformanceInsightsTopSql",
+      "Effect": "Allow",
+      "Action": [
+        "pi:DescribeDimensionKeys"
+      ],
+      "Resource": "*"
     }
   ]
 }
