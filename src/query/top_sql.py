@@ -29,7 +29,12 @@ _TOP_SQL_METRIC = "db.load.avg"
 _DEFAULT_MAX_RESULTS = 10
 _MIN_LOOKBACK_MINUTES = 1
 _MAX_LOOKBACK_MINUTES = 24 * 60
-_SQL_TEXT_CHAR_LIMIT = 500
+# Long enough that the model still sees a statement's shape -- its
+# WHERE clause, JOINs and ORDER BY are what any tuning suggestion has to
+# be based on -- while still bounding one pathological query's share of
+# the prompt.
+_SQL_TEXT_CHAR_LIMIT = 1200
+_TRUNCATION_MARKER = "…"
 
 
 def _validate_lookback_minutes(
@@ -54,16 +59,32 @@ def _validate_lookback_minutes(
 
 def _truncate_sql_text(
     sql_text: str | None,
-) -> str | None:
-    """Cap an SQL statement's length so one query can't blow out the prompt."""
+) -> tuple[str | None, bool]:
+    """Cap an SQL statement's length, reporting whether it was cut.
+
+    Returns (text, was_truncated). The flag matters downstream: a
+    tuning suggestion made from a statement whose tail is missing can
+    be confidently wrong -- the part that was cut off is exactly where
+    a WHERE clause or a LIMIT would have been -- so callers surface it
+    rather than letting the model reason as if it saw the whole query.
+
+    Performance Insights can also return an already-shortened statement
+    for a very long query, which no flag here can detect. The prompt
+    therefore treats long SQL as potentially incomplete in general, not
+    only when this function did the cutting.
+    """
 
     if sql_text is None:
-        return None
+        return None, False
 
     if len(sql_text) <= _SQL_TEXT_CHAR_LIMIT:
-        return sql_text
+        return sql_text, False
 
-    return sql_text[:_SQL_TEXT_CHAR_LIMIT] + "..."
+    return (
+        sql_text[:_SQL_TEXT_CHAR_LIMIT]
+        + _TRUNCATION_MARKER,
+        True,
+    )
 
 
 def fetch_top_sql(
@@ -107,15 +128,22 @@ def fetch_top_sql(
     for key in response.get("Keys", []):
         dimensions = key.get("Dimensions", {})
 
+        sql_text, was_truncated = (
+            _truncate_sql_text(
+                dimensions.get(
+                    "db.sql.statement"
+                )
+            )
+        )
+
         rows.append(
             {
                 "sql_id": dimensions.get(
                     "db.sql.tokenized_id"
                 ),
-                "sql_text": _truncate_sql_text(
-                    dimensions.get(
-                        "db.sql.statement"
-                    )
+                "sql_text": sql_text,
+                "sql_text_truncated": (
+                    was_truncated
                 ),
                 "avg_active_sessions": round(
                     float(key.get("Total", 0.0)),
