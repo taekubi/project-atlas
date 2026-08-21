@@ -71,6 +71,14 @@ METRIC_DEFINITIONS: dict[str, dict[str, str]] = {
         "unit": "Bytes",
     },
 
+    # Aurora cluster storage (auto-scaling; published once per cluster
+    # under the DBClusterIdentifier dimension, not per instance --
+    # Aurora has no per-instance "free space" concept).
+    "VolumeBytesUsed": {
+        "statistic": "Average",
+        "unit": "Bytes",
+    },
+
     # Aurora replication
     "AuroraReplicaLag": {
         "statistic": "Maximum",
@@ -334,6 +342,50 @@ def resolve_metric_profile(
             metrics,
             "CPUCreditBalance",
         )
+
+    return MetricProfileSelection(
+        profile_name=profile_name,
+        resource_profile=resource_profile,
+        metrics=tuple(metrics),
+    )
+
+
+def resolve_cluster_metric_profile(
+    cluster: dict[str, Any],
+    profile_name: str = PROFILE_NAME,
+) -> MetricProfileSelection:
+    """Resolve DBClusterIdentifier-dimensioned metrics for one DB cluster.
+
+    Complements resolve_metric_profile, which only resolves metrics
+    published under the DBInstanceIdentifier dimension. Aurora storage
+    auto-scales and is not a per-instance concept -- CloudWatch
+    publishes its usage (VolumeBytesUsed) once per cluster -- so it
+    needs a separate collection path keyed by the cluster's own
+    identifier rather than any one member instance.
+    """
+
+    if profile_name != PROFILE_NAME:
+        raise ValueError(
+            f"Unsupported metric profile: {profile_name}"
+        )
+
+    engine = str(
+        cluster.get("engine") or ""
+    ).lower()
+
+    metrics: list[str] = []
+
+    if _is_aurora(engine):
+        _append_unique(
+            metrics,
+            "VolumeBytesUsed",
+        )
+
+    resource_profile = (
+        "aurora-cluster"
+        if _is_aurora(engine)
+        else "cluster-generic"
+    )
 
     return MetricProfileSelection(
         profile_name=profile_name,

@@ -1,11 +1,13 @@
 """Parse free-form /atlas requests into structured query parameters.
 
-Complements the fixed "health <target> [date|Nm|Nh]" grammar in
-src.handlers.slack_command_handler.parse_command_text: that fast, free,
-deterministic parser is tried first; this Bedrock-based parser is the
-fallback for genuine natural language, e.g. "watchcon-a 최근 30분 상태
-확인해줘". Both return the same (target_name, mode, value) shape so
-downstream handling does not need to know which parser was used.
+Complements the fixed "health <target> [date|Nm|Nh]" and "storage
+<target> [Nd]" grammars in
+src.handlers.slack_command_handler.parse_command_text: that fast,
+free, deterministic parser is tried first; this Bedrock-based parser
+is the fallback for genuine natural language, e.g. "watchcon-a 최근
+30분 상태 확인해줘" or "watchcon-a 스토리지 얼마나 남았어?". Both
+return the same (target_name, mode, value) shape so downstream
+handling does not need to know which parser was used.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ _DEFAULT_MODEL_ID = (
 )
 
 _DEFAULT_LOOKBACK_MINUTES = 30
+_DEFAULT_STORAGE_LOOKBACK_DAYS = 30
 
 _TOOL_NAME = "resolve_db_health_query"
 
@@ -49,12 +52,18 @@ _TOOL_SPEC = {
                         "enum": [
                             "live",
                             "date",
+                            "storage",
                         ],
                         "description": (
                             "'live' for a recent/current-status question "
                             "(e.g. 최근 30분, 지금, 방금) or when no "
                             "explicit calendar date is given. 'date' only "
-                            "when a specific calendar date is named."
+                            "when a specific calendar date is named. "
+                            "'storage' for a storage/disk capacity "
+                            "question (e.g. 스토리지 얼마나 남았어, "
+                            "용량 며칠 뒤 소진돼, 디스크 꽉 차겠어) -- "
+                            "anything asking about free space, capacity, "
+                            "or when storage will run out."
                         ),
                     },
                     "lookback_minutes": {
@@ -71,6 +80,15 @@ _TOOL_SPEC = {
                         "description": (
                             "Only when mode is 'date': the date as "
                             "YYYY-MM-DD."
+                        ),
+                    },
+                    "lookback_days": {
+                        "type": "integer",
+                        "description": (
+                            "Only when mode is 'storage': how many days "
+                            "of history to fit the storage trend on. "
+                            "Default to 30 if the request does not "
+                            "specify a window."
                         ),
                     },
                 },
@@ -145,6 +163,25 @@ def parse_health_intent(
             )
 
         return target_name, "date", date
+
+    if tool_input.get("mode") == "storage":
+        lookback_days = tool_input.get(
+            "lookback_days"
+        )
+
+        if (
+            not isinstance(lookback_days, int)
+            or lookback_days <= 0
+        ):
+            lookback_days = (
+                _DEFAULT_STORAGE_LOOKBACK_DAYS
+            )
+
+        return (
+            target_name,
+            "storage",
+            str(lookback_days),
+        )
 
     lookback_minutes = tool_input.get(
         "lookback_minutes"
