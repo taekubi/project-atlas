@@ -3,6 +3,7 @@
     "ATLAS_BUCKET": "project-atlas-data-714933490352-ap-northeast-2",
     "ATLAS_STORAGE_REGION": "ap-northeast-2",
     "ATLAS_CONFIG_KEY": "config/atlas.toml",
+    "ATLAS_LOG_LEVEL": "INFO",
     "ATLAS_CONFIG_LOCAL_PATH": "/tmp/atlas.toml",
     "ATLAS_OUTPUT_ROOT": "/tmp/rds-discovery-metrics"
   }

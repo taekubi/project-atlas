@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +14,16 @@ from src.config.atlas_config import (
     AtlasConfig,
     load_config,
 )
+from src.observability.logger import (
+    elapsed_ms,
+    get_logger,
+    request_id as context_request_id,
+)
 from src.pipelines.configured_rds_metrics_pipeline import (
     run_configured_pipeline,
 )
+
+logger = get_logger(__name__)
 
 
 def _required_env(name: str) -> str:
@@ -134,6 +142,20 @@ def lambda_handler(
         )
     )
 
+    started = time.perf_counter()
+
+    logger.info(
+        "collection_started",
+        extra={
+            "request_id": (
+                context_request_id(context)
+            ),
+            "config_bucket": bucket_name,
+            "config_key": config_key,
+            "storage_region": storage_region,
+        },
+    )
+
     config = _download_config(
         bucket_name=bucket_name,
         object_key=config_key,
@@ -175,6 +197,27 @@ def lambda_handler(
         )
         if context is not None
         else None
+    )
+
+    logger.info(
+        "collection_succeeded",
+        extra={
+            "request_id": request_id,
+            "enabled_target_count": len(
+                config.enabled_targets
+            ),
+            "execution_count": len(
+                executions
+            ),
+            "discovered_instance_count": (
+                discovered_instance_count
+            ),
+            "selected_instance_count": (
+                selected_instance_count
+            ),
+            "uploaded_count": uploaded_count,
+            "duration_ms": elapsed_ms(started),
+        },
     )
 
     return {
