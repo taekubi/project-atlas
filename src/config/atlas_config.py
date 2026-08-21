@@ -151,10 +151,18 @@ def _positive_int(
         key
     )
 
+    # bool is a subclass of int in Python, so isinstance(True, int) is
+    # True and would otherwise let a TOML `true`/`false` through as 1/0
+    # -- excluded explicitly so a typo'd boolean fails loudly here
+    # rather than silently becoming a 1-minute lookback window.
     if (
         not isinstance(
             value,
             int,
+        )
+        or isinstance(
+            value,
+            bool,
         )
         or value <= 0
     ):
