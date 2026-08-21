@@ -114,14 +114,91 @@ def build_metric_data_queries(
     return queries, column_by_query_id
 
 
-def fetch_live_health(
-    session: boto3.Session,
-    resource_id: str,
-    lookback_minutes: int,
-) -> dict[str, str | None]:
-    """Fetch one live DB Health Snapshot row from CloudWatch."""
+_MAX_QUERIES_PER_CALL = 500
 
-    validate_resource_id(resource_id)
+
+def build_batch_metric_data_queries(
+    resource_ids: list[str],
+    period_seconds: int,
+) -> tuple[
+    list[dict],
+    dict[str, tuple[str, str]],
+]:
+    """Build one GetMetricData query per (resource, metric, statistic).
+
+    Reuses build_metric_data_queries per resource and renamespaces each
+    query's Id with the resource's position in the list, so every Id
+    stays unique when all resources' queries are sent in the same
+    GetMetricData call. The returned mapping is keyed by that
+    namespaced Id and points back to (resource_id, column), so a single
+    batched response can be split back out per resource.
+    """
+
+    queries: list[dict] = []
+    target_by_query_id: dict[
+        str, tuple[str, str]
+    ] = {}
+
+    for r_index, resource_id in enumerate(
+        resource_ids
+    ):
+        (
+            resource_queries,
+            column_by_query_id,
+        ) = build_metric_data_queries(
+            resource_id=resource_id,
+            period_seconds=period_seconds,
+        )
+
+        for query in resource_queries:
+            namespaced_id = (
+                f"r{r_index}_{query['Id']}"
+            )
+            target_by_query_id[
+                namespaced_id
+            ] = (
+                resource_id,
+                column_by_query_id[
+                    query["Id"]
+                ],
+            )
+            query["Id"] = namespaced_id
+            queries.append(query)
+
+    return queries, target_by_query_id
+
+
+def fetch_live_health_batch(
+    session: boto3.Session,
+    resource_ids: list[str],
+    lookback_minutes: int,
+) -> list[dict[str, str | None]]:
+    """Fetch a live DB Health Snapshot row for every resource, batched.
+
+    A separate GetMetricData call per resource means an account-wide
+    query's latency grows linearly with fleet size and can reach this
+    Lambda's timeout on a larger account. GetMetricData accepts up to
+    500 metric queries per call, and each resource needs
+    len(_METRIC_STATS) of them, so resource_ids is chunked to fit and
+    each chunk costs one round trip covering every resource in it
+    rather than one call per resource.
+
+    This does not reduce the number of metrics billed -- GetMetricData
+    is priced per metric requested, not per call, so the same resources
+    cost the same either way. The saving is wall-clock latency (fewer
+    sequential round trips) and fewer individual calls that can be
+    throttled, not CloudWatch API charges.
+
+    Returns one row per resource_id, in the same order, each shaped
+    like fetch_live_health's single row.
+    """
+
+    if not resource_ids:
+        return []
+
+    for resource_id in resource_ids:
+        validate_resource_id(resource_id)
+
     _validate_lookback_minutes(
         lookback_minutes
     )
@@ -133,44 +210,88 @@ def fetch_live_health(
         minutes=lookback_minutes
     )
 
-    queries, column_by_query_id = (
-        build_metric_data_queries(
-            resource_id=resource_id,
-            period_seconds=period_seconds,
-        )
-    )
-
     cloudwatch = session.client(
         "cloudwatch"
     )
 
-    response = cloudwatch.get_metric_data(
-        MetricDataQueries=queries,
-        StartTime=start_time,
-        EndTime=end_time,
-        ScanBy="TimestampDescending",
-    )
-
-    row: dict[str, str | None] = {
-        "resource_id": resource_id,
+    rows_by_resource: dict[
+        str, dict[str, str | None]
+    ] = {
+        resource_id: {
+            "resource_id": resource_id
+        }
+        for resource_id in resource_ids
     }
 
-    for result in response.get(
-        "MetricDataResults",
-        [],
+    chunk_size = max(
+        1,
+        _MAX_QUERIES_PER_CALL
+        // len(_METRIC_STATS),
+    )
+
+    for chunk_start in range(
+        0, len(resource_ids), chunk_size
     ):
-        column = column_by_query_id[
-            result["Id"]
+        chunk = resource_ids[
+            chunk_start : chunk_start
+            + chunk_size
         ]
-        values = result.get(
-            "Values",
-            [],
+
+        (
+            queries,
+            target_by_query_id,
+        ) = build_batch_metric_data_queries(
+            resource_ids=chunk,
+            period_seconds=period_seconds,
         )
 
-        row[column] = (
-            str(round(float(values[0]), 4))
-            if values
-            else None
+        response = (
+            cloudwatch.get_metric_data(
+                MetricDataQueries=queries,
+                StartTime=start_time,
+                EndTime=end_time,
+                ScanBy="TimestampDescending",
+            )
         )
 
-    return row
+        for result in response.get(
+            "MetricDataResults", []
+        ):
+            target = target_by_query_id.get(
+                result["Id"]
+            )
+
+            if target is None:
+                continue
+
+            resource_id, column = target
+            values = result.get(
+                "Values", []
+            )
+
+            rows_by_resource[resource_id][
+                column
+            ] = (
+                str(round(float(values[0]), 4))
+                if values
+                else None
+            )
+
+    return [
+        rows_by_resource[resource_id]
+        for resource_id in resource_ids
+    ]
+
+
+def fetch_live_health(
+    session: boto3.Session,
+    resource_id: str,
+    lookback_minutes: int,
+) -> dict[str, str | None]:
+    """Fetch one live DB Health Snapshot row from CloudWatch."""
+
+    return fetch_live_health_batch(
+        session=session,
+        resource_ids=[resource_id],
+        lookback_minutes=lookback_minutes,
+    )[0]

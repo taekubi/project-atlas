@@ -31,7 +31,7 @@ from src.collectors.rds_inventory import (
     collect_rds_inventory,
 )
 from src.query.live_health import (
-    fetch_live_health,
+    fetch_live_health_batch,
 )
 from src.query.top_sql import (
     fetch_top_sql,
@@ -150,14 +150,11 @@ def summarize_top_sql(
     with no entry there simply gets no Top SQL data in this summary.
     """
 
-    health_rows = [
-        fetch_live_health(
-            session=target_session,
-            resource_id=resource_id,
-            lookback_minutes=lookback_minutes,
-        )
-        for resource_id in resource_ids
-    ]
+    health_rows = fetch_live_health_batch(
+        session=target_session,
+        resource_ids=resource_ids,
+        lookback_minutes=lookback_minutes,
+    )
 
     top_sql_by_resource: dict[
         str, list[dict[str, str | float | None]]

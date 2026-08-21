@@ -35,7 +35,9 @@ from src.query.athena_client import (
 )
 from src.query.baseline import run_baseline
 from src.query.db_health import run_db_health_snapshot
-from src.query.live_health import fetch_live_health
+from src.query.live_health import (
+    fetch_live_health_batch,
+)
 
 _DEFAULT_MODEL_ID = (
     "apac.anthropic.claude-3-5-sonnet-20241022-v2:0"
@@ -247,22 +249,21 @@ def summarize_live_db_health(
     current reading comes from CloudWatch directly for a recent lookback
     window, since batch latency is not acceptable for a monitoring
     question. resource_ids can be more than one (e.g. every member of a
-    cluster resolved by name) -- each gets its own CloudWatch call and
-    row, summarized together in one Bedrock call. The historical
-    baseline compared against still comes from Curated/Athena
-    (account_id/region/output_location are only used for that baseline
-    lookup) -- best-effort, since a missing baseline should not block a
-    live reading.
+    cluster resolved by name, or every instance in an account-wide
+    query) -- fetched in as few CloudWatch calls as the 500-query
+    batch limit allows (see fetch_live_health_batch) rather than one
+    call per resource, then summarized together in one Bedrock call.
+    The historical baseline compared against still comes from
+    Curated/Athena (account_id/region/output_location are only used
+    for that baseline lookup) -- best-effort, since a missing baseline
+    should not block a live reading.
     """
 
-    rows = [
-        fetch_live_health(
-            session=cloudwatch_session,
-            resource_id=resource_id,
-            lookback_minutes=lookback_minutes,
-        )
-        for resource_id in resource_ids
-    ]
+    rows = fetch_live_health_batch(
+        session=cloudwatch_session,
+        resource_ids=resource_ids,
+        lookback_minutes=lookback_minutes,
+    )
 
     def _has_any_data(
         row: dict[str, str | None],
