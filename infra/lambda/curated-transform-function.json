@@ -1,0 +1,26 @@
+{
+  "FunctionName": "project-atlas-curated-transform",
+  "Runtime": "python3.12",
+  "Architectures": [
+    "x86_64"
+  ],
+  "Role": "arn:aws:iam::714933490352:role/project-atlas-curated-transform-role",
+  "Handler": "src.handlers.cloudwatch_curated_handler.lambda_handler",
+  "Description": "Refresh the Curated CloudWatch Parquet layer and repair the Athena table",
+  "Timeout": 300,
+  "MemorySize": 1024,
+  "EphemeralStorage": {
+    "Size": 1024
+  },
+  "Layers": [
+    "arn:aws:lambda:ap-northeast-2:336392948345:layer:AWSSDKPandas-Python312:24"
+  ],
+  "Environment": {
+    "Variables": {
+      "ATLAS_BUCKET": "project-atlas-data-714933490352-ap-northeast-2",
+      "ATLAS_STORAGE_REGION": "ap-northeast-2",
+      "ATLAS_ATHENA_OUTPUT_LOCATION": "s3://project-atlas-data-714933490352-ap-northeast-2/athena-results/",
+      "ATLAS_LOG_LEVEL": "INFO"
+    }
+  }
+}
