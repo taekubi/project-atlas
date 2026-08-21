@@ -8,12 +8,19 @@ correlation-based root-cause estimate and a concrete next step, not a
 guess invented from nothing. True root cause still needs the DBA to
 read the actual query plan, so the model is told to frame this as an
 estimate to verify, not a certainty.
+
+The model answers through a forced tool call rather than as prose, so
+each ranked statement gets its own finding/suggestion that can be
+rendered directly beneath that statement in Slack. Prose covering ten
+queries at once reads as a wall of text and forces the reader to match
+"the third query" back to a list themselves.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from typing import Any
 
 import boto3
 from botocore.exceptions import (
@@ -25,7 +32,7 @@ from botocore.exceptions import (
 from src.ai.bedrock_client import (
     BedrockInvocationError,
     create_session as create_bedrock_session,
-    invoke_model,
+    invoke_tool,
 )
 from src.collectors.rds_inventory import (
     collect_rds_inventory,
@@ -42,25 +49,152 @@ _DEFAULT_MODEL_ID = (
     "apac.anthropic.claude-3-5-sonnet-20241022-v2:0"
 )
 
+# Ten ranked statements, each with a finding and a suggestion, plus the
+# overall assessment, runs past the shared 1024-token default.
+_MAX_ANALYSIS_TOKENS = 3000
+
+_TOOL_NAME = "report_top_sql_analysis"
+
+_TOOL_SPEC = {
+    "toolSpec": {
+        "name": _TOOL_NAME,
+        "description": (
+            "Report the Top SQL analysis: one overall assessment of "
+            "the current load level, plus one entry per ranked SQL "
+            "statement."
+        ),
+        "inputSchema": {
+            "json": {
+                "type": "object",
+                "properties": {
+                    "overall": {
+                        "type": "string",
+                        "description": (
+                            "2-4 sentences in Korean. State whether "
+                            "the current load level actually warrants "
+                            "tuning attention, citing the figures. "
+                            "Correlate the CloudWatch metrics with the "
+                            "SQL ranking: if CPU/connections/IOPS look "
+                            "elevated and one or two statements "
+                            "dominate avg_active_sessions, say so. If "
+                            "total load is low, say plainly that "
+                            "nothing here is urgent rather than "
+                            "manufacturing a concern."
+                        ),
+                    },
+                    "queries": {
+                        "type": "array",
+                        "description": (
+                            "One entry per ranked statement you have "
+                            "something useful to say about. Skip a "
+                            "statement rather than padding it with a "
+                            "generic remark."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "resource_id": {
+                                    "type": "string",
+                                    "description": (
+                                        "The resource_id the "
+                                        "statement was ranked under, "
+                                        "copied exactly."
+                                    ),
+                                },
+                                "rank": {
+                                    "type": "integer",
+                                    "description": (
+                                        "The statement's rank within "
+                                        "that resource, as given."
+                                    ),
+                                },
+                                "finding": {
+                                    "type": "string",
+                                    "description": (
+                                        "One short Korean sentence: "
+                                        "what about this statement is "
+                                        "worth noting (e.g. no WHERE "
+                                        "clause, SELECT *, a pattern "
+                                        "suggesting N+1, a large IN "
+                                        "list)."
+                                    ),
+                                },
+                                "suggestion": {
+                                    "type": "string",
+                                    "description": (
+                                        "One short Korean sentence: "
+                                        "the concrete next step to "
+                                        "check or try. Omit if there "
+                                        "is nothing actionable."
+                                    ),
+                                },
+                                "confidence": {
+                                    "type": "string",
+                                    "enum": [
+                                        "high",
+                                        "medium",
+                                        "low",
+                                    ],
+                                    "description": (
+                                        "How much the visible "
+                                        "statement text supports the "
+                                        "finding. Use 'low' whenever "
+                                        "sql_text_truncated is true "
+                                        "or the statement is long "
+                                        "enough that its tail may be "
+                                        "missing -- the cut-off part "
+                                        "is exactly where a WHERE or "
+                                        "LIMIT would be."
+                                    ),
+                                },
+                            },
+                            "required": [
+                                "resource_id",
+                                "rank",
+                                "finding",
+                                "confidence",
+                            ],
+                        },
+                    },
+                },
+                "required": [
+                    "overall",
+                    "queries",
+                ],
+            }
+        },
+    }
+}
+
 _SYSTEM_PROMPT = (
     "You are Project Atlas, an operations assistant for an AWS "
     "Cloud DBA. Atlas has already computed exact numbers from two "
     "sources for the same recent window: live CloudWatch metrics "
     "(CPU/connections/IOPS/latency) and Performance Insights' Top "
-    "SQL ranking, where avg_active_sessions is Average Active "
+    "SQL ranking, where avg_active_sessions (AAS) is Average Active "
     "Sessions attributable to each SQL statement -- PI's standard "
     "measure of database load, not a literal event count. You only "
     "interpret the numbers you are given and never invent a figure "
-    "that is not present in the data. Correlate the two: if "
-    "CPU/connections/IOPS look elevated and one or two SQL "
-    "statements dominate avg_active_sessions, name them as the "
-    "likely driver and suggest a concrete next step (e.g. a missing "
-    "index, an N+1 pattern, an unexpectedly large IN clause, a lock "
-    "wait). This is a correlation-based estimate, not a certainty -- "
-    "say so, since confirming true root cause needs the DBA to read "
-    "the actual query plan. If a resource has no Top SQL data for "
-    "the window, say so instead of guessing. Answer in Korean, "
-    "concise and DBA-oriented."
+    "that is not present in the data. "
+    "Read the load level before reading the ranking. AAS is roughly "
+    "the average number of sessions actively working at once, so a "
+    "total well under 1.0 means the database was close to idle for "
+    "the window -- the top-ranked statement is then only the busiest "
+    "of a quiet period, not a problem. Say that plainly when it is "
+    "true; ranking something first does not make it worth tuning. "
+    "Load becomes genuinely interesting as AAS approaches and "
+    "exceeds the instance's vCPU count. "
+    "Any tuning suggestion you give is a hypothesis read off the "
+    "statement text, not a diagnosis: you cannot see the execution "
+    "plan, table sizes, or existing indexes, so frame suggestions as "
+    "what to check. When sql_text_truncated is true the statement's "
+    "tail is missing -- do not claim a WHERE clause or LIMIT is "
+    "absent when you may simply not be seeing it; set confidence to "
+    "'low' and say what would need to be confirmed. "
+    "If a resource has no Top SQL data for the window, say so "
+    "instead of guessing. Answer in Korean, concise and "
+    "DBA-oriented, and call the "
+    f"{_TOOL_NAME} tool to deliver the result."
 )
 
 
@@ -107,6 +241,26 @@ def _format_prompt(
                 "for this window"
             )
         else:
+            total_aas = round(
+                sum(
+                    float(
+                        sql_row[
+                            "avg_active_sessions"
+                        ]
+                        or 0.0
+                    )
+                    for sql_row in top_sql_rows
+                ),
+                4,
+            )
+
+            lines.append(
+                f"[{resource_id}] Top SQL total "
+                f"avg_active_sessions={total_aas} "
+                f"across {len(top_sql_rows)} "
+                "ranked statements"
+            )
+
             for rank, sql_row in enumerate(
                 top_sql_rows, start=1
             ):
@@ -115,6 +269,8 @@ def _format_prompt(
                     "avg_active_sessions="
                     f"{sql_row['avg_active_sessions']}, "
                     f"sql_id={sql_row['sql_id']}, "
+                    "sql_text_truncated="
+                    f"{bool(sql_row.get('sql_text_truncated'))}, "
                     f"sql_text={sql_row['sql_text']}"
                 )
 
@@ -138,7 +294,7 @@ def summarize_top_sql(
     dict[
         str, list[dict[str, str | float | None]]
     ],
-    str,
+    dict[str, Any],
 ]:
     """Fetch live health + Top SQL for each resource and return an AI estimate.
 
@@ -148,6 +304,11 @@ def summarize_top_sql(
     to resources with Performance Insights enabled (see
     src.query.top_sql.resolve_pi_dbi_resource_ids) -- a resource_id
     with no entry there simply gets no Top SQL data in this summary.
+
+    The third return value is the analysis: `{"overall": str,
+    "queries": [...]}`, where each query entry carries the
+    resource_id/rank it annotates so a caller can render it against
+    the statement it refers to.
     """
 
     health_rows = fetch_live_health_batch(
@@ -183,8 +344,13 @@ def summarize_top_sql(
         return (
             health_rows,
             top_sql_by_resource,
-            "해당 기간에 Performance Insights에 기록된 "
-            "SQL 활동이 없습니다.",
+            {
+                "overall": (
+                    "해당 기간에 Performance Insights에 기록된 "
+                    "SQL 활동이 없습니다."
+                ),
+                "queries": [],
+            },
         )
 
     user_prompt = _format_prompt(
@@ -193,14 +359,81 @@ def summarize_top_sql(
         lookback_minutes=lookback_minutes,
     )
 
-    summary = invoke_model(
+    tool_input = invoke_tool(
         session=bedrock_session,
         model_id=model_id,
         system_prompt=_SYSTEM_PROMPT,
         user_prompt=user_prompt,
+        tool_spec=_TOOL_SPEC,
+        max_tokens=_MAX_ANALYSIS_TOKENS,
     )
 
-    return health_rows, top_sql_by_resource, summary
+    return (
+        health_rows,
+        top_sql_by_resource,
+        _normalize_analysis(tool_input),
+    )
+
+
+def _normalize_analysis(
+    tool_input: dict[str, Any],
+) -> dict[str, Any]:
+    """Coerce the model's tool input into the shape callers render.
+
+    The tool schema is advisory rather than enforced, so entries can
+    come back missing a rank or carrying a rank as a string. Anything
+    that cannot be tied back to a specific ranked statement is dropped
+    rather than rendered against the wrong query.
+    """
+
+    overall = str(
+        tool_input.get("overall") or ""
+    ).strip()
+
+    queries: list[dict[str, Any]] = []
+
+    for entry in tool_input.get("queries") or []:
+        if not isinstance(entry, dict):
+            continue
+
+        resource_id = str(
+            entry.get("resource_id") or ""
+        ).strip()
+
+        try:
+            rank = int(entry.get("rank"))
+        except (TypeError, ValueError):
+            continue
+
+        if not resource_id or rank < 1:
+            continue
+
+        finding = str(
+            entry.get("finding") or ""
+        ).strip()
+
+        if not finding:
+            continue
+
+        queries.append(
+            {
+                "resource_id": resource_id,
+                "rank": rank,
+                "finding": finding,
+                "suggestion": str(
+                    entry.get("suggestion") or ""
+                ).strip(),
+                "confidence": str(
+                    entry.get("confidence")
+                    or "low"
+                ).strip(),
+            }
+        )
+
+    return {
+        "overall": overall,
+        "queries": queries,
+    }
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -320,7 +553,7 @@ def main() -> None:
         (
             health_rows,
             top_sql_by_resource,
-            summary,
+            analysis,
         ) = summarize_top_sql(
             target_session=target_session,
             bedrock_session=bedrock_session,
@@ -366,17 +599,59 @@ def main() -> None:
 
     print()
 
+    findings_by_key = {
+        (
+            entry["resource_id"],
+            entry["rank"],
+        ): entry
+        for entry in analysis["queries"]
+    }
+
     for resource_id, sql_rows in (
         top_sql_by_resource.items()
     ):
         print(f"[{resource_id}] Top SQL:")
 
-        for sql_row in sql_rows:
-            print(f"  {sql_row}")
+        for rank, sql_row in enumerate(
+            sql_rows, start=1
+        ):
+            truncated_note = (
+                " (truncated)"
+                if sql_row.get(
+                    "sql_text_truncated"
+                )
+                else ""
+            )
+
+            print(
+                f"  #{rank} AAS="
+                f"{sql_row['avg_active_sessions']} "
+                f"sql_id={sql_row['sql_id']}"
+                f"{truncated_note}"
+            )
+            print(
+                f"      {sql_row['sql_text']}"
+            )
+
+            entry = findings_by_key.get(
+                (resource_id, rank)
+            )
+
+            if entry:
+                print(
+                    f"      -> {entry['finding']}"
+                    f" [{entry['confidence']}]"
+                )
+
+                if entry["suggestion"]:
+                    print(
+                        "         "
+                        f"{entry['suggestion']}"
+                    )
 
     print()
     print("-" * 60)
-    print(summary)
+    print(analysis["overall"])
 
 
 if __name__ == "__main__":

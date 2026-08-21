@@ -531,6 +531,179 @@ def format_slack_message(
     )
 
 
+_SLACK_SQL_DISPLAY_LIMIT = 400
+
+_CONFIDENCE_LABELS = {
+    "high": "가능성 높음",
+    "medium": "가능성 보통",
+    "low": "확인 필요",
+}
+
+
+def _format_sql_block(
+    sql_text: str | None,
+    already_truncated: bool,
+) -> tuple[str, bool]:
+    """Render one statement as a Slack code block.
+
+    Returns (block, shortened_for_display). The full statement is
+    already capped upstream for the prompt's sake; this shortens it
+    further for readability in a channel, so a reader is told when what
+    they are looking at is not the whole query and should be opened in
+    the Performance Insights console instead.
+    """
+
+    if not sql_text:
+        return (
+            "```(SQL 텍스트 없음)```",
+            False,
+        )
+
+    display_text = sql_text
+    shortened = already_truncated
+
+    if len(display_text) > _SLACK_SQL_DISPLAY_LIMIT:
+        display_text = (
+            display_text[
+                :_SLACK_SQL_DISPLAY_LIMIT
+            ]
+            + "…"
+        )
+        shortened = True
+
+    return (
+        f"```{display_text}```",
+        shortened,
+    )
+
+
+def format_top_sql_message(
+    target_name: str,
+    label: str,
+    top_sql_by_resource: dict[
+        str, list[dict[str, str | float | None]]
+    ],
+    analysis: dict[str, Any],
+    resource_ids_without_pi: list[str],
+) -> str:
+    """Render the Top SQL ranking, with the AI's note under each statement.
+
+    Unlike the other modes, this one shows the underlying rows rather
+    than only the AI's prose: "which query is loading the database" is
+    a question whose answer *is* the ranked list, and a summary that
+    refers to statements without showing them leaves the reader unable
+    to act on it.
+    """
+
+    lines = [
+        f"*{target_name} Top SQL 분석* ({label})"
+    ]
+
+    overall = (analysis.get("overall") or "").strip()
+
+    if overall:
+        lines.extend(["", overall])
+
+    findings_by_key = {
+        (
+            entry["resource_id"],
+            entry["rank"],
+        ): entry
+        for entry in analysis.get("queries", [])
+    }
+
+    show_resource_headers = (
+        len(top_sql_by_resource) > 1
+    )
+
+    for resource_id, sql_rows in (
+        top_sql_by_resource.items()
+    ):
+        if not sql_rows:
+            continue
+
+        if show_resource_headers:
+            lines.extend(
+                ["", f"*— {resource_id} —*"]
+            )
+
+        for rank, sql_row in enumerate(
+            sql_rows, start=1
+        ):
+            lines.append("")
+            lines.append(
+                f"*{rank}.* AAS "
+                f"`{sql_row['avg_active_sessions']}`"
+                f"  ·  `{sql_row['sql_id']}`"
+            )
+
+            block, shortened = (
+                _format_sql_block(
+                    sql_text=sql_row.get(
+                        "sql_text"
+                    ),
+                    already_truncated=bool(
+                        sql_row.get(
+                            "sql_text_truncated"
+                        )
+                    ),
+                )
+            )
+            lines.append(block)
+
+            if shortened:
+                lines.append(
+                    "_쿼리가 길어 일부만 표시했습니다. "
+                    "전체 구문은 Performance Insights "
+                    "콘솔에서 확인하세요._"
+                )
+
+            entry = findings_by_key.get(
+                (resource_id, rank)
+            )
+
+            if not entry:
+                continue
+
+            confidence = _CONFIDENCE_LABELS.get(
+                entry["confidence"],
+                entry["confidence"],
+            )
+
+            lines.append(
+                f"> {entry['finding']} "
+                f"({confidence})"
+            )
+
+            if entry["suggestion"]:
+                lines.append(
+                    f"> 제안: {entry['suggestion']}"
+                )
+
+    if resource_ids_without_pi:
+        lines.extend(
+            [
+                "",
+                "_Performance Insights가 꺼져 있어 "
+                "제외된 리소스: "
+                + ", ".join(
+                    resource_ids_without_pi
+                )
+                + "_",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "_개선 제안은 SQL 구문만 보고 추정한 것으로, "
+            "실행계획 확인이 필요합니다._",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
 def _json_response(
     status_code: int,
     body: dict[str, Any],
@@ -837,6 +1010,10 @@ def handle_query_job(
     target_name: str | None = None
     mode: str | None = None
 
+    # Set only by modes that render their own Slack message instead of
+    # going through format_slack_message.
+    rendered_text: str | None = None
+
     logger.info(
         "query_job_started",
         extra={
@@ -1053,8 +1230,8 @@ def handle_query_job(
 
             (
                 rows,
-                _top_sql_by_resource,
-                summary,
+                top_sql_by_resource,
+                analysis,
             ) = summarize_top_sql(
                 target_session=target_session,
                 bedrock_session=bedrock_session,
@@ -1068,18 +1245,25 @@ def handle_query_job(
                 model_id=model_id,
             )
 
-            if resource_ids_without_pi:
-                summary += (
-                    "\n\n(Performance Insights가 "
-                    "꺼져 있어 제외된 리소스: "
-                    + ", ".join(
-                        resource_ids_without_pi
-                    )
-                    + ")"
-                )
-
             label = f"최근 {lookback_minutes}분"
             title = "Top SQL 분석"
+
+            # Rendered here rather than through
+            # format_slack_message: this mode's answer is the ranked
+            # list itself, not a paragraph about it.
+            rendered_text = (
+                format_top_sql_message(
+                    target_name=target_name,
+                    label=label,
+                    top_sql_by_resource=(
+                        top_sql_by_resource
+                    ),
+                    analysis=analysis,
+                    resource_ids_without_pi=(
+                        resource_ids_without_pi
+                    ),
+                )
+            )
 
         elif mode == "report":
             report_month = value
@@ -1131,12 +1315,16 @@ def handle_query_job(
             label = date
             title = "DB Health"
 
-        text = format_slack_message(
-            target_name=target_name,
-            label=label,
-            rows=rows,
-            summary=summary,
-            title=title,
+        text = (
+            rendered_text
+            if rendered_text is not None
+            else format_slack_message(
+                target_name=target_name,
+                label=label,
+                rows=rows,
+                summary=summary,
+                title=title,
+            )
         )
 
         logger.info(
