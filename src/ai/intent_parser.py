@@ -1,13 +1,14 @@
 """Parse free-form /atlas requests into structured query parameters.
 
-Complements the fixed "health <target> [date|Nm|Nh]" and "storage
-<target> [Nd]" grammars in
+Complements the fixed "health <target> [date|Nm|Nh]", "storage
+<target> [Nd]", and "topsql <target> [Nm]" grammars in
 src.handlers.slack_command_handler.parse_command_text: that fast,
 free, deterministic parser is tried first; this Bedrock-based parser
 is the fallback for genuine natural language, e.g. "watchcon-a 최근
-30분 상태 확인해줘" or "watchcon-a 스토리지 얼마나 남았어?". Both
-return the same (target_name, mode, value) shape so downstream
-handling does not need to know which parser was used.
+30분 상태 확인해줘", "watchcon-a 스토리지 얼마나 남았어?", or
+"watchcon-a 지금 가장 부하 큰 SQL이 뭐야?". Both return the same
+(target_name, mode, value) shape so downstream handling does not need
+to know which parser was used.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ _DEFAULT_MODEL_ID = (
 
 _DEFAULT_LOOKBACK_MINUTES = 30
 _DEFAULT_STORAGE_LOOKBACK_DAYS = 30
+_DEFAULT_TOPSQL_LOOKBACK_MINUTES = 10
 
 _TOOL_NAME = "resolve_db_health_query"
 
@@ -53,6 +55,7 @@ _TOOL_SPEC = {
                             "live",
                             "date",
                             "storage",
+                            "topsql",
                         ],
                         "description": (
                             "'live' for a recent/current-status question "
@@ -63,15 +66,20 @@ _TOOL_SPEC = {
                             "question (e.g. 스토리지 얼마나 남았어, "
                             "용량 며칠 뒤 소진돼, 디스크 꽉 차겠어) -- "
                             "anything asking about free space, capacity, "
-                            "or when storage will run out."
+                            "or when storage will run out. 'topsql' for "
+                            "a question about which SQL/query is "
+                            "causing load right now (e.g. 가장 많은 "
+                            "이벤트를 발생시키는 SQL이 뭐야, top sql, "
+                            "부하 원인이 뭐야, 뭐가 느려)."
                         ),
                     },
                     "lookback_minutes": {
                         "type": "integer",
                         "description": (
-                            "Only when mode is 'live': the lookback "
-                            "window in minutes. Convert hours to minutes "
-                            "(e.g. 1시간 -> 60). Default to 30 if the "
+                            "Only when mode is 'live' or 'topsql': the "
+                            "lookback window in minutes. Convert hours "
+                            "to minutes (e.g. 1시간 -> 60). Default to "
+                            "30 for 'live' or 10 for 'topsql' if the "
                             "request does not specify a window."
                         ),
                     },
@@ -181,6 +189,27 @@ def parse_health_intent(
             target_name,
             "storage",
             str(lookback_days),
+        )
+
+    if tool_input.get("mode") == "topsql":
+        lookback_minutes = tool_input.get(
+            "lookback_minutes"
+        )
+
+        if (
+            not isinstance(
+                lookback_minutes, int
+            )
+            or lookback_minutes <= 0
+        ):
+            lookback_minutes = (
+                _DEFAULT_TOPSQL_LOOKBACK_MINUTES
+            )
+
+        return (
+            target_name,
+            "topsql",
+            str(lookback_minutes),
         )
 
     lookback_minutes = tool_input.get(

@@ -15,6 +15,7 @@ ACCOUNT_ID_PATTERN = re.compile(r"^\d{12}$")
 REGION_PATTERN = re.compile(r"^[a-z]{2}-[a-z]+-\d$")
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 RESOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+DBI_RESOURCE_ID_PATTERN = re.compile(r"^db-[A-Z0-9]+$")
 
 
 def validate(
@@ -77,4 +78,16 @@ def validate_resource_id(
         resource_id,
         RESOURCE_ID_PATTERN,
         "resource_id",
+    )
+
+
+def validate_dbi_resource_id(
+    dbi_resource_id: str,
+) -> str:
+    """Validate an RDS Performance Insights DbiResourceId (e.g. db-ABC123...)."""
+
+    return validate(
+        dbi_resource_id,
+        DBI_RESOURCE_ID_PATTERN,
+        "dbi_resource_id",
     )
